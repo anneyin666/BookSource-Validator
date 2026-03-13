@@ -139,6 +139,7 @@
         :current-url="progressData.current"
         :current-name="progressData.currentName"
         :elapsed-time="elapsedTime"
+        :estimated-remaining="progressData.estimatedRemaining || 0"
         @cancel="handleCancelValidation"
       />
 
@@ -185,9 +186,15 @@
           </div>
         </div>
 
-        <!-- 失败书源分组 -->
+        <!-- 失败书源分析（分类展示） -->
+        <FailedSources
+          v-if="state.sourceData.failedCategories && Object.keys(state.sourceData.failedCategories).length > 0"
+          :failed-categories="state.sourceData.failedCategories"
+        />
+
+        <!-- 失败书源分组（详细列表） -->
         <div v-if="state.sourceData.failedGroups && state.sourceData.failedGroups.length > 0" class="failed-groups">
-          <h3 class="failed-title">❌ 失败书源分析</h3>
+          <h3 class="failed-title">📋 失败详情（按原因分组）</h3>
           <div class="failed-list">
             <div
               v-for="group in state.sourceData.failedGroups"
@@ -259,7 +266,9 @@ import ThemeToggle from './components/ThemeToggle.vue'
 import FilterOptions from './components/FilterOptions.vue'
 import BatchProcessor from './components/BatchProcessor.vue'
 import SearchValidator from './components/SearchValidator.vue'
+import FailedSources from './components/FailedSources.vue'
 import { useSources } from './composables/useSources.js'
+import { useToast } from './composables/useToast.js'
 import { parseFile, parseUrl, startValidation, startValidationFromData, getProgressEventSource, getSearchProgressEventSource, cancelValidation, startBatchFilesValidation, startBatchUrlsValidation, parseBatchFiles, parseBatchUrls, startSearchValidation } from './api/sources.js'
 import { downloadJson, formatDate } from './utils/download.js'
 import { ref, computed, onMounted, watch, onUnmounted } from 'vue'
@@ -279,6 +288,9 @@ const {
   reset: resetState,
   clearMessages
 } = useSources()
+
+// Toast 提示
+const { showSuccess, showError, showWarning, showInfo } = useToast()
 
 // 设置（从localStorage读取）
 const concurrency = ref(16)
@@ -356,10 +368,10 @@ async function pasteAndParse() {
     if (text && text.trim().startsWith('http')) {
       handleUrlFetch(text.trim())
     } else {
-      setWarning('剪贴板内容不是有效的链接')
+      showWarning('剪贴板内容不是有效的链接')
     }
   } catch (err) {
-    setError('无法读取剪贴板')
+    showError('无法读取剪贴板')
   }
 }
 
@@ -378,6 +390,7 @@ function handleClear() {
   if (batchProcessorRef.value) {
     batchProcessorRef.value.reset()
   }
+  showInfo('已清除当前数据')
 }
 
 // 处理文件上传
@@ -403,15 +416,15 @@ async function handleUrlFetch(url) {
     const result = await parseUrl(url, 'dedup', concurrency.value, timeout.value, filterTypesStr)
 
     if (result.code !== 200) {
-      setError(result.message)
+      showError(result.message)
       return
     }
 
     urlSourceData.value = result.data
     setSourceData(result.data)
-    setSuccess(`获取成功！共 ${result.data.total} 条书源`)
+    showSuccess(`在线解析成功，共 ${result.data.total} 条书源`)
   } catch (err) {
-    setError('网络错误，请稍后重试')
+    showError('网络错误，请稍后重试')
   } finally {
     setLoading(false)
   }
@@ -423,7 +436,7 @@ async function handleDedupOnly() {
     await handleDedupFile()
   } else if (urlSourceData.value) {
     setSourceData(urlSourceData.value)
-    setSuccess(`去重完成！有效书源 ${urlSourceData.value.validCount} 条`)
+    showSuccess(`去重完成，有效书源 ${urlSourceData.value.validCount} 条`)
   }
 }
 
@@ -439,14 +452,19 @@ async function handleDedupFile() {
     const result = await parseFile(state.file, 'dedup', concurrency.value, timeout.value, filterTypesStr)
 
     if (result.code !== 200) {
-      setError(result.message)
+      showError(result.message)
       return
     }
 
     setSourceData(result.data)
-    setSuccess(`去重完成！有效书源 ${result.data.validCount} 条`)
+    const duplicatesRemoved = result.data.total - result.data.validCount
+    if (duplicatesRemoved > 0) {
+      showSuccess(`去重完成，移除 ${duplicatesRemoved} 条重复，有效 ${result.data.validCount} 条`)
+    } else {
+      showSuccess(`去重完成，有效书源 ${result.data.validCount} 条`)
+    }
   } catch (err) {
-    setError('处理失败，请稍后重试')
+    showError('处理失败，请稍后重试')
   } finally {
     setLoading(false)
   }
@@ -493,7 +511,7 @@ async function handleFullValidateFile() {
     const startResult = await startValidation(state.file, concurrency.value, timeout.value, filterTypesStr)
 
     if (startResult.code !== 200) {
-      setError(startResult.message)
+      showError(startResult.message)
       setValidating(false)
       return
     }
@@ -507,7 +525,8 @@ async function handleFullValidateFile() {
       valid: 0,
       invalid: 0,
       current: '',
-      currentName: ''
+      currentName: '',
+      estimatedRemaining: 0
     }
 
     startTimer()
@@ -518,7 +537,7 @@ async function handleFullValidateFile() {
 
       if (data.error) {
         stopTimer()
-        setError(data.error)
+        showError(data.error)
         eventSource.close()
         setValidating(false)
         return
@@ -539,15 +558,16 @@ async function handleFullValidateFile() {
           deepInvalid: data.invalidCount,
           validCount: data.validCount,
           dedupedSources: data.validSources || [],
-          failedGroups: data.failedGroups || []
+          failedGroups: data.failedGroups || [],
+          failedCategories: data.failedCategories || {}
         }
 
         setSourceData(resultData)
         const invalidTotal = startData.formatInvalid + (data.invalidCount || 0)
         if (invalidTotal > 0) {
-          setSuccess(`校验完成！有效书源 ${data.validCount} 条，失效 ${invalidTotal} 条，耗时 ${elapsedTime.value} 秒`)
+          showSuccess(`校验完成，有效 ${data.validCount} 条，失效 ${invalidTotal} 条`)
         } else {
-          setSuccess(`校验完成！有效书源 ${data.validCount} 条，耗时 ${elapsedTime.value} 秒`)
+          showSuccess(`校验完成，全部有效，共 ${data.validCount} 条`)
         }
         return
       }
@@ -557,7 +577,7 @@ async function handleFullValidateFile() {
         eventSource.close()
         setValidating(false)
         progressData.value = null
-        setWarning('校验已取消')
+        showWarning('校验已取消')
         return
       }
 
@@ -567,20 +587,21 @@ async function handleFullValidateFile() {
         valid: data.valid,
         invalid: data.invalid,
         current: data.current,
-        currentName: data.currentName || ''
+        currentName: data.currentName || '',
+        estimatedRemaining: data.estimatedRemaining || 0
       }
     }
 
     eventSource.onerror = () => {
       stopTimer()
       eventSource.close()
-      setError('连接中断，请重试')
+      showError('连接中断，请重试')
       setValidating(false)
     }
 
   } catch (err) {
     stopTimer()
-    setError('校验失败，请稍后重试')
+    showError('校验失败，请稍后重试')
     setValidating(false)
   }
 }
@@ -597,7 +618,8 @@ async function handleFullValidateUrl() {
     valid: 0,
     invalid: 0,
     current: '',
-    currentName: ''
+    currentName: '',
+    estimatedRemaining: 0
   }
 
   startTimer()
@@ -610,7 +632,7 @@ async function handleFullValidateUrl() {
     )
 
     if (result.code !== 200) {
-      setError(result.message)
+      showError(result.message)
       setValidating(false)
       stopTimer()
       return
@@ -624,7 +646,7 @@ async function handleFullValidateUrl() {
 
       if (data.error) {
         stopTimer()
-        setError(data.error)
+        showError(data.error)
         eventSource.close()
         setValidating(false)
         return
@@ -644,7 +666,8 @@ async function handleFullValidateUrl() {
           deepInvalid: data.invalidCount,
           validCount: data.validCount,
           dedupedSources: data.validSources || [],
-          failedGroups: data.failedGroups || []
+          failedGroups: data.failedGroups || [],
+          failedCategories: data.failedCategories || {}
         }
 
         setSourceData(resultData)
@@ -662,7 +685,7 @@ async function handleFullValidateUrl() {
         eventSource.close()
         setValidating(false)
         progressData.value = null
-        setWarning('校验已取消')
+        showWarning('校验已取消')
         return
       }
 
@@ -672,20 +695,21 @@ async function handleFullValidateUrl() {
         valid: data.valid,
         invalid: data.invalid,
         current: data.current,
-        currentName: data.currentName || ''
+        currentName: data.currentName || '',
+        estimatedRemaining: data.estimatedRemaining || 0
       }
     }
 
     eventSource.onerror = () => {
       stopTimer()
       eventSource.close()
-      setError('连接中断，请重试')
+      showError('连接中断，请重试')
       setValidating(false)
     }
 
   } catch (err) {
     stopTimer()
-    setError('校验失败，请稍后重试')
+    showError('校验失败，请稍后重试')
     setValidating(false)
   }
 }
@@ -708,7 +732,7 @@ async function handleBatchProcess({ type, data, mode }) {
       }
 
       if (result.code !== 200) {
-        setError(result.message)
+        showError(result.message)
         return
       }
 
@@ -723,7 +747,7 @@ async function handleBatchProcess({ type, data, mode }) {
       setSourceData(result.data)
       setSuccess(`批量去重完成！有效书源 ${result.data.validCount} 条`)
     } catch (err) {
-      setError('批量处理失败，请稍后重试')
+      showError('批量处理失败，请稍后重试')
     } finally {
       setLoading(false)
     }
@@ -744,7 +768,7 @@ async function handleBatchProcess({ type, data, mode }) {
     }
 
     if (startResult.code !== 200) {
-      setError(startResult.message)
+      showError(startResult.message)
       setValidating(false)
       return
     }
@@ -758,7 +782,8 @@ async function handleBatchProcess({ type, data, mode }) {
       valid: 0,
       invalid: 0,
       current: '',
-      currentName: ''
+      currentName: '',
+      estimatedRemaining: 0
     }
 
     // 更新批量统计
@@ -777,7 +802,7 @@ async function handleBatchProcess({ type, data, mode }) {
 
       if (data.error) {
         stopTimer()
-        setError(data.error)
+        showError(data.error)
         eventSource.close()
         setValidating(false)
         return
@@ -797,7 +822,8 @@ async function handleBatchProcess({ type, data, mode }) {
           deepInvalid: data.invalidCount,
           validCount: data.validCount,
           dedupedSources: data.validSources || [],
-          failedGroups: data.failedGroups || []
+          failedGroups: data.failedGroups || [],
+          failedCategories: data.failedCategories || {}
         }
 
         setSourceData(resultData)
@@ -815,7 +841,7 @@ async function handleBatchProcess({ type, data, mode }) {
         eventSource.close()
         setValidating(false)
         progressData.value = null
-        setWarning('校验已取消')
+        showWarning('校验已取消')
         return
       }
 
@@ -825,20 +851,21 @@ async function handleBatchProcess({ type, data, mode }) {
         valid: data.valid,
         invalid: data.invalid,
         current: data.current,
-        currentName: data.currentName || ''
+        currentName: data.currentName || '',
+        estimatedRemaining: data.estimatedRemaining || 0
       }
     }
 
     eventSource.onerror = () => {
       stopTimer()
       eventSource.close()
-      setError('连接中断，请重试')
+      showError('连接中断，请重试')
       setValidating(false)
     }
 
   } catch (err) {
     stopTimer()
-    setError('批量校验失败，请稍后重试')
+    showError('批量校验失败，请稍后重试')
     setValidating(false)
   }
 }
@@ -855,9 +882,9 @@ async function handleCancelValidation() {
     stopTimer()
     setValidating(false)
     progressData.value = null
-    setWarning('校验已取消')
+    showWarning('校验已取消')
   } catch (err) {
-    setError('取消失败')
+    showError('取消失败')
   }
 }
 
@@ -871,7 +898,7 @@ async function handleSearchValidation(payload) {
 
   if (!state.file) {
     console.error('state.file 为空，无法开始校验')
-    setError('请先上传书源文件')
+    showError('请先上传书源文件')
     return
   }
 
@@ -894,7 +921,7 @@ async function handleSearchValidation(payload) {
     console.log('startSearchValidation 返回结果:', startResult)
 
     if (startResult.code !== 200) {
-      setError(startResult.message)
+      showError(startResult.message)
       setValidating(false)
       return
     }
@@ -908,7 +935,8 @@ async function handleSearchValidation(payload) {
       valid: 0,
       invalid: 0,
       current: '',
-      currentName: ''
+      currentName: '',
+      estimatedRemaining: 0
     }
 
     startTimer()
@@ -934,7 +962,7 @@ async function handleSearchValidation(payload) {
 
       if (data.error) {
         stopTimer()
-        setError(data.error)
+        showError(data.error)
         eventSource.close()
         setValidating(false)
         return
@@ -954,7 +982,8 @@ async function handleSearchValidation(payload) {
           deepInvalid: data.invalidCount,
           validCount: data.validCount,
           dedupedSources: data.validSources || [],
-          failedGroups: data.failedGroups || []
+          failedGroups: data.failedGroups || [],
+          failedCategories: data.failedCategories || {}
         }
 
         setSourceData(resultData)
@@ -972,7 +1001,7 @@ async function handleSearchValidation(payload) {
         eventSource.close()
         setValidating(false)
         progressData.value = null
-        setWarning('校验已取消')
+        showWarning('校验已取消')
         return
       }
 
@@ -982,7 +1011,8 @@ async function handleSearchValidation(payload) {
         valid: data.valid,
         invalid: data.invalid,
         current: data.current,
-        currentName: data.currentName || ''
+        currentName: data.currentName || '',
+        estimatedRemaining: data.estimatedRemaining || 0
       }
     }
 
@@ -990,14 +1020,14 @@ async function handleSearchValidation(payload) {
       console.error('搜索校验 SSE 连接错误')
       stopTimer()
       eventSource.close()
-      setError('连接中断，请重试')
+      showError('连接中断，请重试')
       setValidating(false)
     }
 
   } catch (err) {
     console.error('搜索校验异常:', err)
     stopTimer()
-    setError('搜索校验失败，请稍后重试')
+    showError('搜索校验失败，请稍后重试')
     setValidating(false)
   }
 }
@@ -1010,6 +1040,7 @@ function handleDownload() {
     state.sourceData.dedupedSources,
     `阅读书源_去重有效_${formatDate(new Date())}.json`
   )
+  showSuccess('已下载有效书源文件')
 }
 
 // 导出失败书源
@@ -1033,6 +1064,7 @@ function handleExportFailed() {
     failedSources,
     `阅读书源_失败列表_${formatDate(new Date())}.json`
   )
+  showSuccess(`已导出 ${failedSources.length} 条失败书源`)
 }
 </script>
 

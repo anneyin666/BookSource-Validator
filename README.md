@@ -118,6 +118,7 @@ BookSource-Validator/
 - [前端组件设计](docs/前端组件设计.md)
 - [系统架构设计](docs/系统架构设计.md)
 - [UI设计规范](docs/UI设计规范.md)
+- [生产环境部署指南](docs/部署指南.md)
 
 ## 开发
 

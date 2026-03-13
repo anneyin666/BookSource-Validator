@@ -16,6 +16,9 @@
       <span class="stat-item valid">✅ 有效: {{ valid }}</span>
       <span class="stat-item invalid">❌ 失败: {{ invalid }}</span>
       <span class="stat-item time">⏱️ 耗时: {{ formatTime(elapsedTime) }}</span>
+      <span class="stat-item estimate" v-if="estimatedRemaining > 0">
+        📊 预估剩余: {{ formatTime(estimatedRemaining) }}
+      </span>
     </div>
 
     <div class="progress-current" v-if="currentUrl || currentName">
@@ -61,6 +64,10 @@ const props = defineProps({
   elapsedTime: {
     type: Number,
     default: 0
+  },
+  estimatedRemaining: {
+    type: Number,
+    default: 0
   }
 })
 
@@ -89,10 +96,10 @@ function truncateText(text, maxLen) {
 
 function formatTime(seconds) {
   if (seconds < 60) {
-    return `${seconds}秒`
+    return `${Math.round(seconds)}秒`
   }
   const mins = Math.floor(seconds / 60)
-  const secs = seconds % 60
+  const secs = Math.round(seconds % 60)
   return `${mins}分${secs}秒`
 }
 </script>
@@ -148,6 +155,10 @@ function formatTime(seconds) {
 
 .stat-item.time {
   color: #fef08a;
+}
+
+.stat-item.estimate {
+  color: #c4b5fd;
 }
 
 .progress-current {

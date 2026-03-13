@@ -1,7 +1,8 @@
 # 校验会话管理
 import asyncio
 import uuid
-from typing import Dict, Optional, List
+import time
+from typing import Dict, Optional, List, Any
 from dataclasses import dataclass, field
 
 
@@ -34,6 +35,10 @@ class ValidationSession:
     # 搜索校验额外信息
     search_keyword: str = ""
     validate_type: str = "search"  # 'search' 或 'explore'
+    # 时间统计
+    start_time: float = 0.0  # 开始时间戳
+    # 任务引用（用于取消）
+    validation_tasks: List[Any] = field(default_factory=list)
 
 
 class SessionManager:
@@ -51,7 +56,8 @@ class SessionManager:
             total=len(sources),
             sources=sources,
             concurrency=concurrency,
-            timeout=timeout
+            timeout=timeout,
+            start_time=time.time()  # 记录开始时间
         )
         async with self._lock:
             self._sessions[session_id] = session
@@ -88,6 +94,11 @@ class SessionManager:
             session = self._sessions.get(session_id)
             if session:
                 session.status = "cancelled"
+                # 取消所有正在运行的任务
+                for task in session.validation_tasks:
+                    if not task.done():
+                        task.cancel()
+                session.validation_tasks = []
 
     async def delete_session(self, session_id: str):
         """删除会话"""

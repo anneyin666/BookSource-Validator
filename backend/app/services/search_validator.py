@@ -704,3 +704,99 @@ class SearchValidatorService:
         await asyncio.gather(*tasks)
 
         return valid_sources, failed_sources
+
+
+# ===================== 错误分类工具 =====================
+
+# 错误分类定义
+ERROR_CATEGORIES = {
+    'fixable': {
+        'name': '可修复',
+        'icon': '🔄',
+        'hint': '这些书源可能因网络问题暂时失效，可稍后重试',
+        'keywords': ['超时', '连接失败', '连接超时', 'SSL错误', '读取超时', '写入超时',
+                     '服务器断开', '协议错误', '网络错误', '连接被拒', 'DNS']
+    },
+    'unfixable': {
+        'name': '不可修复',
+        'icon': '❌',
+        'hint': '这些书源规则有问题或使用了不支持的加密',
+        'keywords': ['无搜索规则', '无发现规则', 'URL格式错误', '无效发现URL',
+                     '不支持', '无法解析JS', 'JS解析失败', '加密']
+    },
+    'checkable': {
+        'name': '需检查',
+        'icon': '⚠️',
+        'hint': '这些书源可能已下线或内容有变化',
+        'keywords': ['HTTP 404', 'HTTP 403', 'HTTP 500', 'HTTP 502', 'HTTP 503',
+                     '搜索无结果', '发现无结果', '未知错误']
+    }
+}
+
+
+def categorize_error(reason: str) -> str:
+    """
+    将错误原因分类
+
+    Args:
+        reason: 错误原因字符串
+
+    Returns:
+        分类标识: 'fixable', 'unfixable', 或 'checkable'
+    """
+    for category, info in ERROR_CATEGORIES.items():
+        for keyword in info['keywords']:
+            if keyword in reason:
+                return category
+    return 'checkable'  # 默认归类为需检查
+
+
+def categorize_failed_sources(failed_groups: list) -> dict:
+    """
+    将失败书源按分类整理
+
+    Args:
+        failed_groups: 失败书源分组列表 [{'reason': '错误原因', 'sources': [...]}]
+
+    Returns:
+        分类后的失败书源 {'fixable': [...], 'unfixable': [...], 'checkable': [...]}
+    """
+    categorized = {
+        'fixable': [],
+        'unfixable': [],
+        'checkable': []
+    }
+
+    for group in failed_groups:
+        reason = group.get('reason', '未知错误')
+        category = categorize_error(reason)
+
+        for source in group.get('sources', []):
+            # 统一数据格式，确保有 name 和 reason 字段
+            # 深度校验使用 name/reason，搜索校验使用 bookSourceName/_failureReason
+            display_name = (
+                source.get('name') or
+                source.get('bookSourceName') or
+                '未知书源'
+            )
+            display_reason = (
+                source.get('reason') or
+                source.get('_failureReason') or
+                reason
+            )
+
+            categorized[category].append({
+                'url': source.get('url') or source.get('bookSourceUrl') or '',
+                'name': display_name,
+                'reason': display_reason,
+                '_category': category,
+                '_categoryName': ERROR_CATEGORIES[category]['name'],
+                '_categoryIcon': ERROR_CATEGORIES[category]['icon']
+            })
+
+    return categorized
+
+
+def get_error_category_info(category: str) -> dict:
+    """获取错误分类信息"""
+    return ERROR_CATEGORIES.get(category, ERROR_CATEGORIES['checkable'])

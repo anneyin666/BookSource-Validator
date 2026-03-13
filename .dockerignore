@@ -1,0 +1,60 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv
+env
+.venv
+*.egg-info
+.eggs
+dist
+build
+
+# Node.js
+node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+.pytest_cache
+.coverage
+htmlcov
+.tox
+
+# Logs
+*.log
+logs
+
+# Claude Code
+.claude
+CLAUDE.md
+
+# Documentation (not needed in container)
+docs/sessions
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Local env files
+.env
+.env.local
+.env.*.local

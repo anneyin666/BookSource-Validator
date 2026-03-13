@@ -5,6 +5,7 @@ from fastapi import BackgroundTasks
 from typing import List
 import json
 import asyncio
+import time
 import logging
 
 from app.models import (
@@ -14,6 +15,7 @@ from app.models import (
 )
 from app.services import ParserService, DeduperService, ValidatorService, FilterService
 from app.services.session_manager import session_manager
+from app.services.search_validator import categorize_failed_sources, ERROR_CATEGORIES
 from app.config import settings
 
 router = APIRouter()
@@ -359,8 +361,12 @@ async def get_validation_progress(session_id: str):
         async with session_manager._lock:
             session.status = "running"
 
+        # 存储校验任务，用于取消
+        validation_tasks = []
+
         # 启动校验任务
         async def run_validation():
+            nonlocal validation_tasks
             try:
                 valid_sources = []
                 failed_sources = {}
@@ -371,13 +377,26 @@ async def get_validation_progress(session_id: str):
 
                 async def validate_single(source):
                     nonlocal processed, valid_sources, failed_sources
+
+                    # 检查是否已取消（直接读取 session 状态，不加锁）
+                    if session.status == "cancelled":
+                        return
+
                     url = source.get('bookSourceUrl', '')
                     name = source.get('bookSourceName', '')
 
                     async with semaphore:
+                        # 再次检查取消状态（直接读取，不加锁）
+                        if session.status == "cancelled":
+                            return
+
                         is_valid, reason = await ValidatorService.validate_source_access(url, session.timeout)
 
                         async with lock:
+                            # 检查取消状态
+                            if session.status == "cancelled":
+                                return
+
                             processed += 1
                             if is_valid:
                                 valid_sources.append(source)
@@ -390,36 +409,36 @@ async def get_validation_progress(session_id: str):
                                     'reason': reason
                                 })
 
-                            # 更新会话进度
-                            # 计算失败书源总数
+                            # 直接更新 session 进度（不加锁，Python GIL 保证原子性）
                             total_failed = sum(len(v) for v in failed_sources.values())
-                            await session_manager.update_progress(
-                                session_id, processed, len(valid_sources),
-                                total_failed, url, name
-                            )
+                            session.processed = processed
+                            session.valid = len(valid_sources)
+                            session.invalid = total_failed
+                            session.current_url = url
+                            session.current_name = name
 
                 # 并发执行
-                tasks = [validate_single(s) for s in session.sources]
-                await asyncio.gather(*tasks)
+                validation_tasks = [asyncio.create_task(validate_single(s)) for s in session.sources]
+                # 保存任务到 session，用于取消（直接访问，不加锁）
+                session.validation_tasks = validation_tasks
+                await asyncio.gather(*validation_tasks, return_exceptions=True)
 
-                # 完成会话
-                await session_manager.complete_session(session_id, valid_sources, failed_sources)
+                # 只有未取消时才完成会话
+                if session.status != "cancelled":
+                    await session_manager.complete_session(session_id, valid_sources, failed_sources)
 
+            except asyncio.CancelledError:
+                logger.info(f"校验任务被取消: {session_id}")
             except Exception as e:
                 logger.error(f"校验异常: {e}")
-                async with session_manager._lock:
-                    session.status = "error"
+                session.status = "error"
 
         # 后台运行校验
-        asyncio.create_task(run_validation())
+        validation_task = asyncio.create_task(run_validation())
 
-        # 持续推送进度
+        # 持续推送进度（直接使用 session 引用，不加锁）
         while True:
-            session = await session_manager.get_session(session_id)
-            if not session:
-                break
-
-            # 检查是否完成
+            # 检查是否完成（直接读取 session.status）
             if session.status in ["completed", "cancelled", "error"]:
                 if session.status == "completed":
                     # 先获取数据，再删除会话
@@ -449,6 +468,7 @@ async def get_validation_progress(session_id: str):
                         "invalidCount": sum(len(v) for v in failed_sources.values()),
                         "validSources": valid_sources,
                         "failedGroups": failed_groups,
+                        "failedCategories": categorize_failed_sources(failed_groups),
                         # 批量处理额外信息
                         "fileStats": session.file_stats,
                         "urlStats": session.url_stats,
@@ -471,6 +491,13 @@ async def get_validation_progress(session_id: str):
                 break
 
             # 发送进度消息（不包含 completed 状态）
+            # 计算已耗时和预估剩余时间
+            elapsed = time.time() - session.start_time if session.start_time > 0 else 0
+            estimated_remaining = 0
+            if session.processed > 0 and session.processed < session.total:
+                avg_time = elapsed / session.processed
+                estimated_remaining = (session.total - session.processed) * avg_time
+
             progress_data = {
                 "processed": session.processed,
                 "total": session.total,
@@ -478,6 +505,8 @@ async def get_validation_progress(session_id: str):
                 "invalid": session.invalid,
                 "current": session.current_url,
                 "currentName": session.current_name,
+                "elapsed": round(elapsed, 1),
+                "estimatedRemaining": round(estimated_remaining, 1),
                 "status": "running"  # 明确标记为运行中
             }
 
@@ -928,7 +957,15 @@ async def get_search_validation_progress(session_id: str):
                     url = source.get('bookSourceUrl', '')
                     name = source.get('bookSourceName', '')
 
+                    # 检查是否已取消（直接读取 session 状态，不加锁）
+                    if session.status == "cancelled":
+                        return
+
                     async with semaphore:
+                        # 再次检查取消状态（直接读取，不加锁）
+                        if session.status == "cancelled":
+                            return
+
                         # 组合模式：分别校验搜索和发现
                         if validate_type == 'both':
                             has_search = SearchValidatorService.has_search_rule(source)
@@ -946,10 +983,12 @@ async def get_search_validation_progress(session_id: str):
                                     failed_source['_ruleType'] = '无规则'
                                     failed_sources["无规则"].append(failed_source)
                                     total_failed = sum(len(v) for v in failed_sources.values())
-                                    await session_manager.update_progress(
-                                        session_id, processed, len(valid_sources),
-                                        total_failed, url, name
-                                    )
+                                    # 直接更新 session 进度（不加锁）
+                                    session.processed = processed
+                                    session.valid = len(valid_sources)
+                                    session.invalid = total_failed
+                                    session.current_url = url
+                                    session.current_name = name
                                 return
 
                             search_valid = False
@@ -1001,10 +1040,12 @@ async def get_search_validation_progress(session_id: str):
                                     failed_sources[reason_str].append(failed_source)
 
                                 total_failed = sum(len(v) for v in failed_sources.values())
-                                await session_manager.update_progress(
-                                    session_id, processed, len(valid_sources),
-                                    total_failed, url, name
-                                )
+                                # 直接更新 session 进度（不加锁）
+                                session.processed = processed
+                                session.valid = len(valid_sources)
+                                session.invalid = total_failed
+                                session.current_url = url
+                                session.current_name = name
 
                         # 单一模式：仅搜索或仅发现
                         elif validate_type == 'search':
@@ -1020,10 +1061,12 @@ async def get_search_validation_progress(session_id: str):
                                     failed_source['_ruleType'] = '仅发现'
                                     failed_sources["无搜索规则"].append(failed_source)
                                     total_failed = sum(len(v) for v in failed_sources.values())
-                                    await session_manager.update_progress(
-                                        session_id, processed, len(valid_sources),
-                                        total_failed, url, name
-                                    )
+                                    # 直接更新 session 进度（不加锁）
+                                    session.processed = processed
+                                    session.valid = len(valid_sources)
+                                    session.invalid = total_failed
+                                    session.current_url = url
+                                    session.current_name = name
                                 return
 
                             is_valid, reason, results = await SearchValidatorService.validate_search(
@@ -1044,10 +1087,12 @@ async def get_search_validation_progress(session_id: str):
                                     failed_sources[reason].append(failed_source)
 
                                 total_failed = sum(len(v) for v in failed_sources.values())
-                                await session_manager.update_progress(
-                                    session_id, processed, len(valid_sources),
-                                    total_failed, url, name
-                                )
+                                # 直接更新 session 进度（不加锁）
+                                session.processed = processed
+                                session.valid = len(valid_sources)
+                                session.invalid = total_failed
+                                session.current_url = url
+                                session.current_name = name
 
                         else:  # explore
                             # 先检查是否有发现规则
@@ -1062,10 +1107,12 @@ async def get_search_validation_progress(session_id: str):
                                     failed_source['_ruleType'] = '仅搜索'
                                     failed_sources["无发现规则"].append(failed_source)
                                     total_failed = sum(len(v) for v in failed_sources.values())
-                                    await session_manager.update_progress(
-                                        session_id, processed, len(valid_sources),
-                                        total_failed, url, name
-                                    )
+                                    # 直接更新 session 进度（不加锁）
+                                    session.processed = processed
+                                    session.valid = len(valid_sources)
+                                    session.invalid = total_failed
+                                    session.current_url = url
+                                    session.current_name = name
                                 return
 
                             is_valid, reason, results = await SearchValidatorService.validate_explore(
@@ -1086,35 +1133,38 @@ async def get_search_validation_progress(session_id: str):
                                     failed_sources[reason].append(failed_source)
 
                                 total_failed = sum(len(v) for v in failed_sources.values())
-                                await session_manager.update_progress(
-                                    session_id, processed, len(valid_sources),
-                                    total_failed, url, name
-                                )
+                                # 直接更新 session 进度（不加锁）
+                                session.processed = processed
+                                session.valid = len(valid_sources)
+                                session.invalid = total_failed
+                                session.current_url = url
+                                session.current_name = name
 
                 # 并发执行
                 logger.info(f"开始并发校验 {len(session.sources)} 个书源")
-                tasks = [validate_single(s) for s in session.sources]
-                await asyncio.gather(*tasks)
+                validation_tasks = [asyncio.create_task(validate_single(s)) for s in session.sources]
+                # 保存任务到 session，用于取消（直接访问，不加锁）
+                session.validation_tasks = validation_tasks
+                await asyncio.gather(*validation_tasks, return_exceptions=True)
 
                 logger.info(f"校验完成: valid={len(valid_sources)}, invalid={sum(len(v) for v in failed_sources.values())}")
-                # 完成会话
-                await session_manager.complete_session(session_id, valid_sources, failed_sources)
+                # 只有未取消时才完成会话
+                if session.status != "cancelled":
+                    await session_manager.complete_session(session_id, valid_sources, failed_sources)
+
+            except asyncio.CancelledError:
+                logger.info(f"搜索校验任务被取消: {session_id}")
 
             except Exception as e:
                 logger.error(f"搜索校验异常: {e}")
-                async with session_manager._lock:
-                    session.status = "error"
+                session.status = "error"
 
         # 后台运行校验
         asyncio.create_task(run_validation())
 
-        # 持续推送进度
+        # 持续推送进度（直接使用 session 引用，不加锁）
         while True:
-            session = await session_manager.get_session(session_id)
-            if not session:
-                break
-
-            # 检查是否完成
+            # 检查是否完成（直接读取 session.status）
             if session.status in ["completed", "cancelled", "error"]:
                 if session.status == "completed":
                     valid_sources = session.valid_sources
@@ -1140,6 +1190,7 @@ async def get_search_validation_progress(session_id: str):
                         "invalidCount": sum(len(v) for v in failed_sources.values()),
                         "validSources": valid_sources,
                         "failedGroups": failed_groups,
+                        "failedCategories": categorize_failed_sources(failed_groups),
                         # 规则类型统计
                         "ruleTypeStats": calculate_rule_type_stats(valid_sources, failed_sources)
                     }
@@ -1156,6 +1207,13 @@ async def get_search_validation_progress(session_id: str):
                 break
 
             # 发送进度消息
+            # 计算已耗时和预估剩余时间
+            elapsed = time.time() - session.start_time if session.start_time > 0 else 0
+            estimated_remaining = 0
+            if session.processed > 0 and session.processed < session.total:
+                avg_time = elapsed / session.processed
+                estimated_remaining = (session.total - session.processed) * avg_time
+
             progress_data = {
                 "processed": session.processed,
                 "total": session.total,
@@ -1163,6 +1221,8 @@ async def get_search_validation_progress(session_id: str):
                 "invalid": session.invalid,
                 "current": session.current_url,
                 "currentName": session.current_name,
+                "elapsed": round(elapsed, 1),
+                "estimatedRemaining": round(estimated_remaining, 1),
                 "status": "running"
             }
 
