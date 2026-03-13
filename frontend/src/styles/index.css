@@ -1,0 +1,264 @@
+/* CSS 变量 - 支持黑暗模式 */
+:root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f7fa;
+  --bg-tertiary: #ecf5ff;
+  --text-primary: #303133;
+  --text-secondary: #606266;
+  --text-muted: #909399;
+  --border-color: #dcdfe6;
+  --border-light: #ebeef5;
+  --card-bg: #ffffff;
+  --shadow-color: rgba(0, 0, 0, 0.1);
+  --progress-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  --failed-bg: #fff5f5;
+  --failed-border: #ffcdd2;
+  --failed-text: #c62828;
+}
+
+/* 黑暗模式 */
+[data-theme="dark"] {
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-tertiary: #0f3460;
+  --text-primary: #eaeaea;
+  --text-secondary: #b0b0b0;
+  --text-muted: #808080;
+  --border-color: #3a3a5a;
+  --border-light: #2a2a4a;
+  --card-bg: #252540;
+  --shadow-color: rgba(0, 0, 0, 0.3);
+  --progress-gradient: linear-gradient(135deg, #4a5568 0%, #2d3748 100%);
+  --failed-bg: #2a1a1a;
+  --failed-border: #4a2a2a;
+  --failed-text: #f87171;
+}
+
+/* Element Plus 黑暗模式覆盖 */
+[data-theme="dark"] .el-input__wrapper {
+  background-color: var(--card-bg) !important;
+  box-shadow: 0 0 0 1px var(--border-color) inset !important;
+}
+
+[data-theme="dark"] .el-input__inner {
+  color: var(--text-primary) !important;
+}
+
+[data-theme="dark"] .el-button {
+  --el-button-bg-color: var(--card-bg);
+  --el-button-border-color: var(--border-color);
+  --el-button-text-color: var(--text-primary);
+}
+
+[data-theme="dark"] .el-progress-bar__outer {
+  background-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+/* 全局样式 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+               'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  line-height: 1.5;
+  transition: background-color 0.3s, color 0.3s;
+}
+
+/* 主容器 */
+.app-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+  min-height: 100vh;
+}
+
+/* 头部 */
+.app-header {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.app-header .title {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.app-header .subtitle {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+/* 输入区域 */
+.input-section {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+/* 统计区域 */
+.stats-section {
+  margin-top: 32px;
+  text-align: center;
+}
+
+.section-title {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 24px;
+}
+
+/* 空状态 */
+.empty-section {
+  text-align: center;
+  padding: 48px;
+  color: var(--text-muted);
+}
+
+/* 页脚 */
+.app-footer {
+  margin-top: 48px;
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  border-top: 1px solid var(--border-light);
+}
+
+/* 响应式 */
+@media (max-width: 768px) {
+  .input-section {
+    grid-template-columns: 1fr;
+  }
+
+  .app-container {
+    padding: 16px;
+  }
+
+  .app-header .title {
+    font-size: 24px;
+  }
+
+  .app-header .subtitle {
+    font-size: 13px;
+  }
+
+  .section-title {
+    font-size: 16px;
+  }
+}
+
+/* 移动端小屏优化 */
+@media (max-width: 575px) {
+  .app-container {
+    padding: 12px;
+  }
+
+  .app-header {
+    margin-bottom: 20px;
+  }
+
+  .app-header .title {
+    font-size: 20px;
+  }
+
+  .app-header .subtitle {
+    font-size: 12px;
+  }
+
+  .input-section {
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .section-title {
+    font-size: 15px;
+    margin-bottom: 16px;
+  }
+
+  .empty-section {
+    padding: 32px 16px;
+  }
+
+  .app-footer {
+    margin-top: 32px;
+    padding: 12px;
+    font-size: 11px;
+  }
+}
+
+/* 触摸设备优化 */
+@media (hover: none) and (pointer: coarse) {
+  /* 增大按钮触摸区域 */
+  .el-button {
+    min-height: 44px;
+    padding: 12px 20px;
+  }
+
+  /* 增大复选框触摸区域 */
+  .el-checkbox {
+    padding: 8px 0;
+  }
+
+  /* 增大输入框高度 */
+  .el-input__inner {
+    padding: 12px;
+  }
+
+  /* 文件上传区域触摸优化 */
+  .drop-zone {
+    min-height: 120px;
+    padding: 24px;
+  }
+
+  .drop-icon {
+    font-size: 40px;
+  }
+
+  .drop-text, .file-name {
+    font-size: 15px;
+  }
+
+  /* 进度条触摸优化 */
+  .progress-container {
+    padding: 20px;
+  }
+
+  .progress-title {
+    font-size: 16px;
+  }
+
+  .cancel-btn {
+    min-height: 48px;
+    font-size: 15px;
+  }
+
+  /* 设置区域触摸优化 */
+  .settings-section {
+    gap: 12px;
+  }
+
+  /* 失败分组触摸优化 */
+  .failed-header {
+    padding: 14px 10px;
+    min-height: 48px;
+  }
+
+  .failed-reason {
+    font-size: 15px;
+  }
+
+  .failed-source-item {
+    padding: 10px 0;
+    min-height: 44px;
+  }
+}

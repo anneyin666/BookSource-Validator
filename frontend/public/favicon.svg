@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- 书本封面 -->
+  <rect x="15" y="10" width="70" height="80" rx="5" fill="#409eff"/>
+  <!-- 内页 -->
+  <rect x="20" y="15" width="60" height="70" rx="3" fill="#fff"/>
+  <!-- 书脊 -->
+  <line x1="50" y1="15" x2="50" y2="85" stroke="#409eff" stroke-width="2"/>
+  <!-- 左页文字行 -->
+  <line x1="30" y1="30" x2="45" y2="30" stroke="#409eff" stroke-width="2"/>
+  <line x1="30" y1="45" x2="45" y2="45" stroke="#409eff" stroke-width="2"/>
+  <line x1="30" y1="60" x2="42" y2="60" stroke="#409eff" stroke-width="2"/>
+  <!-- 右页文字行 -->
+  <line x1="55" y1="30" x2="70" y2="30" stroke="#409eff" stroke-width="2"/>
+  <line x1="55" y1="45" x2="68" y2="45" stroke="#409eff" stroke-width="2"/>
+  <line x1="55" y1="60" x2="65" y2="60" stroke="#409eff" stroke-width="2"/>
+</svg>
