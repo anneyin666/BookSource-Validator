@@ -983,7 +983,8 @@ async function handleSearchValidation(payload) {
           validCount: data.validCount,
           dedupedSources: data.validSources || [],
           failedGroups: data.failedGroups || [],
-          failedCategories: data.failedCategories || {}
+          failedCategories: data.failedCategories || {},
+          ruleTypeStats: data.ruleTypeStats || null
         }
 
         setSourceData(resultData)

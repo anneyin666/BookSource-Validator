@@ -1,7 +1,7 @@
 # FastAPI应用入口
 import os
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -48,7 +48,7 @@ if FRONTEND_DIST.exists() and FRONTEND_DIST.is_dir():
         """
         # API 路由由 router 处理
         if full_path.startswith("api"):
-            return None
+            raise HTTPException(status_code=404, detail="Not Found")
         # 静态文件（带扩展名）尝试直接返回
         file_path = FRONTEND_DIST / full_path
         if file_path.exists() and file_path.is_file():

@@ -54,9 +54,7 @@ const url = ref(props.url || '')
 
 // 同步外部 URL
 watch(() => props.url, (val) => {
-  if (val) {
-    url.value = val
-  }
+  url.value = val || ''
 })
 
 function handleFetch() {

@@ -73,6 +73,16 @@ Desktop.ini
 .claude/
 CLAUDE.md
 
+# Local-only notes / tests (do not upload to GitHub)
+# Note: files already tracked by git will not be removed automatically.
+docs/CODE_REVIEW_FINDINGS_*.md
+docs/sessions/
+backend/tests/
+frontend/src/test/
+frontend/src/__tests__/
+frontend/src/components/__tests__/
+frontend/src/composables/__tests__/
+
 # Lock files (optional - uncomment if you want to ignore)
 # package-lock.json
 # pnpm-lock.yaml

@@ -16,6 +16,7 @@ from app.models import (
 from app.services import ParserService, DeduperService, ValidatorService, FilterService
 from app.services.session_manager import session_manager
 from app.services.search_validator import categorize_failed_sources, ERROR_CATEGORIES
+from app.services.url_security import UrlSecurityService
 from app.config import settings
 
 router = APIRouter()
@@ -99,6 +100,39 @@ def is_valid_source_file(filename: str) -> bool:
     return lower_name.endswith('.json') or lower_name.endswith('.txt')
 
 
+def validate_runtime_options(concurrency, timeout) -> tuple[int, int]:
+    """校验运行时参数。"""
+    try:
+        concurrency = int(concurrency)
+        timeout = int(timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("并发数和超时时间必须为整数") from exc
+
+    if concurrency not in ValidatorService.CONCURRENCY_OPTIONS:
+        raise ValueError("并发数仅支持 1/4/8/16/32")
+
+    if timeout not in ValidatorService.TIMEOUT_OPTIONS:
+        raise ValueError("超时时间仅支持 15/30/45/60 秒")
+
+    return concurrency, timeout
+
+
+def build_empty_source_data(*, file_stats=None, url_stats=None) -> SourceData:
+    """构造空结果，避免错误分支触发响应模型校验失败。"""
+    return SourceData(
+        total=0,
+        dedupCount=0,
+        duplicates=0,
+        duplicateUrls=[],
+        formatInvalid=0,
+        deepInvalid=None,
+        validCount=0,
+        dedupedSources=[],
+        fileStats=file_stats,
+        urlStats=url_stats
+    )
+
+
 @router.post("/parse/file", response_model=ParseResponse)
 async def parse_file(
     file: UploadFile = File(...),
@@ -118,6 +152,11 @@ async def parse_file(
         filter_types: 过滤类型（逗号分隔：official,audio,comic,video）
     """
     logger.info(f"开始解析文件: {file.filename}, 模式: {mode}, 并发: {concurrency}, 超时: {timeout}, 过滤: {filter_types}")
+
+    try:
+        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+    except ValueError as exc:
+        return ParseResponse(code=400, message=str(exc))
 
     # 1. 验证文件
     if not is_valid_source_file(file.filename):
@@ -156,9 +195,18 @@ async def parse_url(request: UrlParseRequest):
     """
     logger.info(f"开始解析URL: {request.url}, 模式: {request.mode}, 并发: {request.concurrency}, 超时: {request.timeout}")
 
+    try:
+        concurrency, timeout = validate_runtime_options(request.concurrency, request.timeout)
+    except ValueError as exc:
+        return ParseResponse(code=400, message=str(exc))
+
     # 1. 验证 URL
     if not request.url.startswith(('http://', 'https://')):
         return ParseResponse(code=400, message="仅支持 HTTP/HTTPS 协议")
+
+    is_safe, error_message = UrlSecurityService.is_safe_remote_url(request.url)
+    if not is_safe:
+        return ParseResponse(code=400, message=error_message)
 
     # 2. 获取远程数据
     import httpx
@@ -184,7 +232,7 @@ async def parse_url(request: UrlParseRequest):
     filter_list = request.filter_types.split(',') if request.filter_types else []
 
     # 5. 处理书源
-    result = await process_sources(data, request.mode, request.concurrency, request.timeout, filter_list)
+    result = await process_sources(data, request.mode, concurrency, timeout, filter_list)
     return ParseResponse(data=result)
 
 
@@ -272,6 +320,11 @@ async def start_validation(
     """
     logger.info(f"开始SSE校验: {file.filename}, 并发: {concurrency}, 超时: {timeout}, 过滤: {filter_types}")
 
+    try:
+        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+    except ValueError as exc:
+        return {"code": 400, "message": str(exc)}
+
     # 1. 验证文件
     if not is_valid_source_file(file.filename):
         return {"code": 400, "message": "仅支持 JSON 或 TXT 格式文件"}
@@ -329,6 +382,11 @@ async def start_validation_from_data(request: dict):
     sources = request.get('sources', [])
     concurrency = request.get('concurrency', 16)
     timeout = request.get('timeout', 30)
+
+    try:
+        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+    except ValueError as exc:
+        return {"code": 400, "message": str(exc)}
 
     logger.info(f"开始SSE校验(数据): 书源数: {len(sources)}, 并发: {concurrency}, 超时: {timeout}")
 
@@ -548,6 +606,11 @@ async def start_batch_files_validation(
     """
     logger.info(f"开始批量解析(SSE) {len(files)} 个文件")
 
+    try:
+        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+    except ValueError as exc:
+        return {"code": 400, "message": str(exc)}
+
     all_sources = []
     file_stats = []
 
@@ -630,6 +693,11 @@ async def start_batch_urls_validation(request: dict):
 
     logger.info(f"开始批量解析(SSE) {len(urls)} 个URL")
 
+    try:
+        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+    except ValueError as exc:
+        return {"code": 400, "message": str(exc)}
+
     if not urls:
         return {"code": 400, "message": "URL列表为空"}
 
@@ -641,6 +709,11 @@ async def start_batch_urls_validation(request: dict):
         for url in urls:
             if not url.startswith(('http://', 'https://')):
                 url_stats.append({"url": url, "valid": False, "error": "无效URL"})
+                continue
+
+            is_safe, error_message = UrlSecurityService.is_safe_remote_url(url)
+            if not is_safe:
+                url_stats.append({"url": url, "valid": False, "error": error_message})
                 continue
 
             try:
@@ -720,6 +793,11 @@ async def parse_batch_files(
     """
     logger.info(f"开始批量解析 {len(files)} 个文件, 模式: {mode}")
 
+    try:
+        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+    except ValueError as exc:
+        return ParseResponse(code=400, message=str(exc))
+
     all_sources = []
     file_stats = []
 
@@ -753,7 +831,11 @@ async def parse_batch_files(
             file_stats.append({"name": file.filename, "valid": False, "error": str(e)})
 
     if not all_sources:
-        return ParseResponse(code=400, message="没有有效的书源数据", data={"fileStats": file_stats})
+        return ParseResponse(
+            code=400,
+            message="没有有效的书源数据",
+            data=build_empty_source_data(file_stats=file_stats)
+        )
 
     # 解析过滤类型
     filter_list = [f.strip() for f in filter_types.split(',') if f.strip()] if filter_types else []
@@ -782,6 +864,11 @@ async def parse_batch_urls(request: dict):
 
     logger.info(f"开始批量解析 {len(urls)} 个URL, 模式: {mode}")
 
+    try:
+        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+    except ValueError as exc:
+        return ParseResponse(code=400, message=str(exc))
+
     if not urls:
         return ParseResponse(code=400, message="URL列表为空")
 
@@ -794,6 +881,11 @@ async def parse_batch_urls(request: dict):
             # 验证 URL
             if not url.startswith(('http://', 'https://')):
                 url_stats.append({"url": url, "valid": False, "error": "无效URL"})
+                continue
+
+            is_safe, error_message = UrlSecurityService.is_safe_remote_url(url)
+            if not is_safe:
+                url_stats.append({"url": url, "valid": False, "error": error_message})
                 continue
 
             try:
@@ -820,7 +912,11 @@ async def parse_batch_urls(request: dict):
                 url_stats.append({"url": url, "valid": False, "error": str(e)})
 
     if not all_sources:
-        return ParseResponse(code=400, message="没有有效的书源数据", data={"urlStats": url_stats})
+        return ParseResponse(
+            code=400,
+            message="没有有效的书源数据",
+            data=build_empty_source_data(url_stats=url_stats)
+        )
 
     # 解析过滤类型
     filter_list = filter_types.split(',') if filter_types else []
@@ -859,6 +955,11 @@ async def start_search_validation(
     """
     logger.info(f"=== [搜索校验] 开始处理 ===")
     logger.info(f"[搜索校验] 文件: {file.filename}, 关键词: {keyword}, 类型: {validate_type}")
+
+    try:
+        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+    except ValueError as exc:
+        return {"code": 400, "message": str(exc)}
 
     # 1. 验证文件
     if not is_valid_source_file(file.filename):
