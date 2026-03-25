@@ -23,3 +23,9 @@ class ValidateStartRequest(BaseModel):
 class ValidateCancelRequest(BaseModel):
     """取消校验请求"""
     sessionId: str
+
+
+class BookSourceExportRequest(BaseModel):
+    """书源导出请求"""
+    sources: List[dict]
+    filename: str = Field(default="阅读书源_去重有效.json", max_length=128)

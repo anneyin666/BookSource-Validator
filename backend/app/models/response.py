@@ -46,6 +46,22 @@ class ParseResponse(BaseModel):
     data: Optional[SourceData] = None
 
 
+class BookSourceExportData(BaseModel):
+    """书源导出数据"""
+    exportId: str
+    path: str
+    filename: str
+    expiresAt: int
+    ttlSeconds: int
+
+
+class BookSourceExportResponse(BaseModel):
+    """书源导出响应"""
+    code: int = 200
+    message: str = "success"
+    data: Optional[BookSourceExportData] = None
+
+
 class ValidateProgressData(BaseModel):
     """校验进度数据"""
     processed: int

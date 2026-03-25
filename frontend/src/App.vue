@@ -227,8 +227,33 @@
         <DownloadButton
           :enabled="hasValidSources"
           :count="state.sourceData?.validCount || 0"
+          :exporting-app="legadoExport.loading"
+          :app-ready="legadoExport.ready"
           @download="handleDownload"
+          @export-app="handleExportToLegado"
         />
+
+        <div
+          v-if="hasValidSources && (legadoExport.loading || legadoExport.downloadUrl)"
+          class="mobile-export-panel"
+        >
+          <p class="mobile-export-title">导出到阅读 App</p>
+          <p class="mobile-export-hint">
+            手机浏览器可直接唤起阅读导入当前有效书源；如果没有自动跳转，可改用下面的临时 JSON 链接。
+          </p>
+          <p v-if="legadoExport.loading" class="mobile-export-status">正在准备临时导出链接...</p>
+          <div v-else class="mobile-export-links">
+            <a
+              class="mobile-export-link"
+              :href="legadoExport.downloadUrl"
+              target="_blank"
+              rel="noreferrer"
+            >
+              打开临时 JSON 链接
+            </a>
+            <span class="mobile-export-expire">{{ legadoExportExpireText }}</span>
+          </div>
+        </div>
 
         <!-- 重新处理按钮 -->
         <button class="restart-btn" @click="handleClear">
@@ -269,8 +294,8 @@ import SearchValidator from './components/SearchValidator.vue'
 import FailedSources from './components/FailedSources.vue'
 import { useSources } from './composables/useSources.js'
 import { useToast } from './composables/useToast.js'
-import { parseFile, parseUrl, startValidation, startValidationFromData, getProgressEventSource, getSearchProgressEventSource, cancelValidation, startBatchFilesValidation, startBatchUrlsValidation, parseBatchFiles, parseBatchUrls, startSearchValidation } from './api/sources.js'
-import { downloadJson, formatDate } from './utils/download.js'
+import { parseFile, parseUrl, startValidation, startValidationFromData, getProgressEventSource, getSearchProgressEventSource, cancelValidation, startBatchFilesValidation, startBatchUrlsValidation, parseBatchFiles, parseBatchUrls, startSearchValidation, createBookSourceExport } from './api/sources.js'
+import { downloadJson, formatDate, buildAbsoluteUrl, buildLegadoImportUrl, openExternalUrl } from './utils/download.js'
 import { ref, computed, onMounted, watch, onUnmounted } from 'vue'
 
 const {
@@ -300,10 +325,21 @@ const expandedGroups = ref({})
 const urlInput = ref('')
 const processMode = ref('single')  // 'single' 或 'batch'
 const batchProcessorRef = ref(null)
+const isMobileBrowser = ref(false)
+const legadoExport = ref(createEmptyLegadoExport())
 
 // 在线解析数据（用于支持深度校验）
 const urlSourceData = ref(null)
 const hasUrlData = computed(() => !!urlSourceData.value)
+const exportSourceFilename = computed(() => `阅读书源_去重有效_${formatDate(new Date())}.json`)
+const legadoExportExpireText = computed(() => {
+  if (!legadoExport.value.expiresAt) return ''
+
+  const remainingSeconds = Math.max(0, legadoExport.value.expiresAt - Math.floor(Date.now() / 1000))
+  if (remainingSeconds <= 0) return '临时链接已过期'
+  if (remainingSeconds > 60) return `约 ${Math.ceil(remainingSeconds / 60)} 分钟后失效`
+  return `约 ${remainingSeconds} 秒后失效`
+})
 
 // SSE 相关
 const progressData = ref(null)
@@ -319,6 +355,7 @@ let timerInterval = null
 onMounted(() => {
   console.log('=== App.vue 已挂载 (版本: 2026-03-13-v2) ===')
   console.log('processMode:', processMode.value)
+  isMobileBrowser.value = /android|iphone|ipad|ipod|mobile/i.test(window.navigator.userAgent)
 
   const savedConcurrency = localStorage.getItem('sourceTool_concurrency')
   const savedTimeout = localStorage.getItem('sourceTool_timeout')
@@ -348,6 +385,88 @@ watch(concurrency, (val) => {
 watch(timeout, (val) => {
   localStorage.setItem('sourceTool_timeout', val)
 })
+
+watch(() => state.sourceData?.dedupedSources, (sources) => {
+  resetLegadoExport()
+
+  if (Array.isArray(sources) && sources.length > 0 && isMobileBrowser.value) {
+    void ensureLegadoExportReady({ silent: true })
+  }
+})
+
+function createEmptyLegadoExport() {
+  return {
+    ready: false,
+    loading: false,
+    downloadUrl: '',
+    legadoUrl: '',
+    expiresAt: 0,
+    sourceCount: 0
+  }
+}
+
+function resetLegadoExport() {
+  legadoExport.value = createEmptyLegadoExport()
+}
+
+function getCachedLegadoExport() {
+  const current = legadoExport.value
+  const currentValidCount = state.sourceData?.validCount || 0
+  const isFresh = (
+    current.ready &&
+    current.downloadUrl &&
+    current.legadoUrl &&
+    current.sourceCount === currentValidCount &&
+    current.expiresAt > Math.floor(Date.now() / 1000) + 30
+  )
+
+  return isFresh ? current : null
+}
+
+async function ensureLegadoExportReady({ silent = false } = {}) {
+  const sources = state.sourceData?.dedupedSources || []
+  if (!Array.isArray(sources) || sources.length === 0) {
+    if (!silent) {
+      showWarning('没有可导出的有效书源')
+    }
+    return null
+  }
+
+  const cached = getCachedLegadoExport()
+  if (cached) {
+    return cached
+  }
+
+  legadoExport.value = {
+    ...createEmptyLegadoExport(),
+    loading: true,
+    sourceCount: sources.length
+  }
+
+  try {
+    const result = await createBookSourceExport(sources, exportSourceFilename.value)
+    if (result.code !== 200) {
+      throw new Error(result.message || '生成导出链接失败')
+    }
+
+    const downloadUrl = buildAbsoluteUrl(result.data.path)
+    legadoExport.value = {
+      ready: true,
+      loading: false,
+      downloadUrl,
+      legadoUrl: buildLegadoImportUrl(downloadUrl),
+      expiresAt: result.data.expiresAt,
+      sourceCount: sources.length
+    }
+    return legadoExport.value
+  } catch (err) {
+    resetLegadoExport()
+    if (!silent) {
+      showError(err.message || '生成导出链接失败')
+    }
+    return null
+  }
+}
 
 // 全局粘贴事件处理
 function handleGlobalPaste(e) {
@@ -386,6 +505,7 @@ function handleClear() {
   urlSourceData.value = null
   urlInput.value = ''
   progressData.value = null
+  resetLegadoExport()
   clearMessages()
   if (batchProcessorRef.value) {
     batchProcessorRef.value.reset()
@@ -1044,6 +1164,21 @@ function handleDownload() {
   showSuccess('已下载有效书源文件')
 }
 
+async function handleExportToLegado() {
+  if (!hasValidSources.value) return
+
+  const exportInfo = getCachedLegadoExport() || await ensureLegadoExportReady()
+  if (!exportInfo) return
+
+  if (!isMobileBrowser.value) {
+    showInfo('已生成临时导出链接。这个入口主要给手机浏览器使用，你也可以直接打开下方链接。')
+    return
+  }
+
+  openExternalUrl(exportInfo.legadoUrl)
+  showInfo('已尝试唤起阅读 App；若未自动跳转，请确认已安装阅读，并尝试打开下方临时链接。')
+}
+
 // 导出失败书源
 function handleExportFailed() {
   if (!state.sourceData?.failedGroups) return
@@ -1176,6 +1311,7 @@ function handleExportFailed() {
 .failed-header {
   display: flex;
   align-items: center;
+  gap: 8px;
   padding: 12px 8px;
   cursor: pointer;
   transition: background 0.2s;
@@ -1256,6 +1392,10 @@ function handleExportFailed() {
   margin-top: 16px;
 }
 
+.settings-section > * {
+  flex: 1 1 260px;
+}
+
 /* 空状态提示 */
 .empty-hint {
   margin-top: 8px;
@@ -1266,12 +1406,14 @@ function handleExportFailed() {
 /* 模式切换 */
 .mode-switch {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 20px;
   justify-content: center;
 }
 
 .mode-btn {
+  min-width: 140px;
   padding: 10px 20px;
   border: 2px solid var(--border-color);
   background: var(--card-bg);
@@ -1337,6 +1479,52 @@ function handleExportFailed() {
   color: #409eff;
 }
 
+.mobile-export-panel {
+  margin-top: 16px;
+  padding: 16px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  text-align: left;
+}
+
+.mobile-export-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.mobile-export-hint {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.mobile-export-status,
+.mobile-export-expire {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.mobile-export-links {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.mobile-export-link {
+  color: #409eff;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.mobile-export-link:hover {
+  text-decoration: underline;
+}
+
 /* 移动端模式切换 */
 @media (max-width: 575px) {
   .mode-switch {
@@ -1344,8 +1532,47 @@ function handleExportFailed() {
   }
 
   .mode-btn {
+    flex: 1 1 calc(50% - 6px);
     padding: 8px 16px;
     font-size: 13px;
+  }
+
+  .settings-section {
+    align-items: stretch;
+  }
+
+  .settings-section > * {
+    flex-basis: 100%;
+    width: 100%;
+  }
+
+  .rule-type-numbers {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .failed-header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .failed-reason {
+    flex: 1 1 100%;
+    text-align: left;
+    word-break: break-word;
+  }
+
+  .failed-count {
+    margin-right: 0;
+  }
+
+  .mobile-export-panel {
+    padding: 14px;
+  }
+
+  .mobile-export-links {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 </style>

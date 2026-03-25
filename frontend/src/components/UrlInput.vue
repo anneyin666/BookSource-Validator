@@ -109,13 +109,37 @@ function isValidUrl(str) {
 }
 
 .input-group {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 12px;
+  align-items: start;
+}
+
+.input-group :deep(.el-input) {
+  min-width: 0;
 }
 
 .input-hint {
   font-size: 12px;
   color: var(--text-muted);
   margin-top: 8px;
+}
+
+@media (max-width: 575px) {
+  .input-group {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .input-group :deep(.el-input) {
+    grid-column: 1 / -1;
+  }
+
+  .input-group :deep(.el-button) {
+    width: 100%;
+  }
+
+  .input-hint {
+    line-height: 1.6;
+  }
 }
 </style>

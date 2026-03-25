@@ -589,6 +589,35 @@ defineExpose({ setStats, reset })
     font-size: 13px;
   }
 
+  .list-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .file-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .file-name,
+  .stat-name {
+    white-space: normal;
+    word-break: break-all;
+  }
+
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .stat-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
   .batch-actions {
     flex-direction: column;
     gap: 8px;

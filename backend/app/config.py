@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     # 请求超时
     REQUEST_TIMEOUT: int = 30
+    EXPORT_TTL_SECONDS: int = 15 * 60  # 导出临时链接有效期（秒）
 
     # 深度校验超时选项（秒）
     TIMEOUT_OPTIONS: List[int] = [15, 30, 45, 60]

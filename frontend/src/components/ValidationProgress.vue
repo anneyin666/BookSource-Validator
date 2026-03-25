@@ -117,6 +117,8 @@ function formatTime(seconds) {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
   margin-bottom: 16px;
 }
 
@@ -167,6 +169,7 @@ function formatTime(seconds) {
   margin-bottom: 16px;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -188,6 +191,7 @@ function formatTime(seconds) {
 .current-url {
   font-family: monospace;
   opacity: 0.8;
+  word-break: break-all;
 }
 
 .cancel-btn {
@@ -223,7 +227,9 @@ function formatTime(seconds) {
   }
 
   .progress-stats {
-    gap: 12px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
   }
 
   .stat-item {
@@ -234,6 +240,11 @@ function formatTime(seconds) {
     flex-direction: column;
     align-items: flex-start;
     gap: 4px;
+  }
+
+  .current-name,
+  .current-url {
+    white-space: normal;
   }
 
   .current-name::after {

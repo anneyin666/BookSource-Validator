@@ -49,6 +49,19 @@ export async function parseUrl(url, mode = 'dedup', concurrency = 16, timeout = 
 }
 
 /**
+ * 创建临时书源导出链接
+ * @param {Array} sources - 有效书源数组
+ * @param {string} filename - 导出文件名
+ */
+export async function createBookSourceExport(sources, filename) {
+  const response = await axios.post(`${API_BASE}/export/book-source`, {
+    sources,
+    filename
+  })
+  return response.data
+}
+
+/**
  * 开始深度校验（SSE模式）- 文件上传
  * @param {File} file - JSON文件
  * @param {number} concurrency - 并发数

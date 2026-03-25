@@ -1,7 +1,9 @@
 # 书源解析路由
-from fastapi import APIRouter, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
-from fastapi import BackgroundTasks
+from pathlib import Path
+from urllib.parse import quote
+
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi.responses import Response, StreamingResponse
 from typing import List
 import json
 import asyncio
@@ -11,9 +13,13 @@ import logging
 from app.models import (
     UrlParseRequest,
     ParseResponse,
-    SourceData
+    SourceData,
+    BookSourceExportRequest,
+    BookSourceExportResponse,
+    BookSourceExportData,
 )
 from app.services import ParserService, DeduperService, ValidatorService, FilterService
+from app.services.export_store import export_store
 from app.services.session_manager import session_manager
 from app.services.search_validator import categorize_failed_sources, ERROR_CATEGORIES
 from app.services.url_security import UrlSecurityService
@@ -133,6 +139,16 @@ def build_empty_source_data(*, file_stats=None, url_stats=None) -> SourceData:
     )
 
 
+def normalize_export_filename(filename: str) -> str:
+    """标准化导出文件名。"""
+    safe_name = Path(filename or "").name.strip()
+    if not safe_name:
+        safe_name = "阅读书源_去重有效.json"
+    if not safe_name.lower().endswith(".json"):
+        safe_name = f"{safe_name}.json"
+    return safe_name
+
+
 @router.post("/parse/file", response_model=ParseResponse)
 async def parse_file(
     file: UploadFile = File(...),
@@ -234,6 +250,53 @@ async def parse_url(request: UrlParseRequest):
     # 5. 处理书源
     result = await process_sources(data, request.mode, concurrency, timeout, filter_list)
     return ParseResponse(data=result)
+
+
+@router.post("/export/book-source", response_model=BookSourceExportResponse)
+async def create_book_source_export(payload: BookSourceExportRequest):
+    """为移动端导出生成一个临时可访问的 JSON 链接。"""
+    if not payload.sources:
+        return BookSourceExportResponse(code=400, message="没有可导出的书源数据")
+
+    filename = normalize_export_filename(payload.filename)
+    content = json.dumps(payload.sources, ensure_ascii=False, indent=2)
+    export_payload = await export_store.create_export(
+        content=content,
+        filename=filename,
+        ttl_seconds=settings.EXPORT_TTL_SECONDS,
+    )
+
+    return BookSourceExportResponse(
+        data=BookSourceExportData(
+            exportId=export_payload.export_id,
+            path=f"/api/export/book-source/{export_payload.export_id}",
+            filename=export_payload.filename,
+            expiresAt=export_payload.expires_at,
+            ttlSeconds=settings.EXPORT_TTL_SECONDS,
+        )
+    )
+
+
+@router.get("/export/book-source/{export_id}", name="download_exported_book_source")
+async def download_exported_book_source(export_id: str):
+    """下载临时导出的书源 JSON。"""
+    export_payload = await export_store.get_export(export_id)
+    if not export_payload:
+        raise HTTPException(status_code=404, detail="导出链接不存在或已过期")
+
+    quoted_filename = quote(export_payload.filename)
+    headers = {
+        "Cache-Control": "no-store, max-age=0",
+        "Content-Disposition": (
+            f"attachment; filename=book-sources.json; "
+            f"filename*=UTF-8''{quoted_filename}"
+        ),
+    }
+    return Response(
+        content=export_payload.content,
+        media_type="application/json",
+        headers=headers,
+    )
 
 
 async def process_sources(data, mode: str = "dedup", concurrency: int = 16, timeout: int = 30, filter_types: list = None) -> SourceData:
