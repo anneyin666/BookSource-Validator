@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:mobile": "vite --host 0.0.0.0 --strictPort",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "preview:mobile": "vite preview --host 0.0.0.0 --strictPort"
   },
   "dependencies": {
     "vue": "^3.4.0",
