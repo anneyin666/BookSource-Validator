@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
@@ -24,6 +25,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 压缩静态资源和 API 响应，降低手机端首次加载体积
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # 注册路由
 app.include_router(router, prefix="/api")
