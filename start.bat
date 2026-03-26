@@ -42,13 +42,13 @@ if not exist "node_modules" (
     echo       Frontend dependencies already installed.
 )
 
-echo [3/4] Starting backend server (port 8000)...
+echo [3/4] Building frontend...
+cd ..\frontend
+call npm run build
+
+echo [4/4] Starting backend server (port 8000)...
 cd ..\backend
 start "Backend" cmd /k python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-echo [4/4] Starting frontend server (port 5173)...
-cd ..\frontend
-start "Frontend" cmd /k npm run dev:mobile
 
 cd ..
 
@@ -60,12 +60,12 @@ echo ========================================
 echo   手机真机测试服务已启动
 echo ========================================
 echo.
-echo   Frontend: http://localhost:5173
+echo   Site: http://localhost:8000
 echo   API Docs: http://localhost:8000/docs
 if defined LAN_IP (
-echo   手机访问: http://%LAN_IP%:5173
+echo   手机访问: http://%LAN_IP%:8000
 ) else (
-echo   手机访问: http://你的电脑局域网IP:5173
+echo   手机访问: http://你的电脑局域网IP:8000
 )
 echo.
 echo   说明:
@@ -76,4 +76,4 @@ echo.
 echo   按任意键打开本机浏览器...
 pause >nul
 
-start http://localhost:5173
+start http://localhost:8000

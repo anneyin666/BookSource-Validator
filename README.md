@@ -71,19 +71,20 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```bash
 cd frontend
 npm install
-npm run dev -- --host 0.0.0.0
+npm run build
 ```
 
 手机访问：
 
 ```text
-http://电脑局域网IP:5173
+http://电脑局域网IP:8000
 ```
 
 说明：
 - 手机和电脑需要连接同一 Wi-Fi
 - 手机端测试“导出到阅读 App”时，手机上需要已安装阅读 App
 - 不要使用 `localhost`，手机无法访问电脑本机的 `localhost`
+- 真机测试优先访问 `8000`，这样前端由后端静态托管，加载更稳
 
 ## 环境要求
 
