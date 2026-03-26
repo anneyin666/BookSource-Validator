@@ -53,7 +53,7 @@ start "Frontend" cmd /k npm run dev:mobile
 cd ..
 
 set "LAN_IP="
-for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "$ip = ipconfig | Select-String -Pattern '(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)' | ForEach-Object { $_.Matches.Value } | Where-Object { $_ -notlike '127.*' -and $_ -notlike '169.254*' } | Select-Object -First 1; if ($ip) { $ip }"`) do set "LAN_IP=%%i"
+for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "$text = ipconfig; $preferred = @('Wireless LAN adapter WLAN','Wireless LAN adapter Wi-Fi','无线局域网适配器 WLAN','无线局域网适配器 Wi-Fi'); foreach ($adapter in $preferred) { $pattern = '(?ms)' + [regex]::Escape($adapter) + '\s*:.*?(?:\r?\n\r?\n|$)'; $section = [regex]::Match($text, $pattern).Value; if ($section -match 'IPv4 Address[^\d]*((?:\d{1,3}\.){3}\d{1,3})') { $matches[1]; exit } }; $fallback = [regex]::Matches($text, '(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)') | ForEach-Object { $_.Value } | Where-Object { $_ -notlike '127.*' -and $_ -notlike '169.254*' } | Select-Object -First 1; if ($fallback) { $fallback }"`) do set "LAN_IP=%%i"
 
 echo.
 echo ========================================
