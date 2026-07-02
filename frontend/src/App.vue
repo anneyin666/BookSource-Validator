@@ -1,6 +1,7 @@
 <template>
   <div class="app-container">
     <!-- 主题切换按钮 -->
+    <FeedbackButton />
     <ThemeToggle />
 
     <!-- 头部 -->
@@ -40,6 +41,10 @@
         >
           🔍 搜索校验
         </button>
+      </div>
+
+      <div v-if="isMobileBrowser" class="mobile-session-warning">
+        手机校验时请保持本页面在前台，锁屏、切到后台或浏览器省电可能中断进度连接。
       </div>
 
       <!-- 单个处理模式 -->
@@ -287,6 +292,7 @@ import MessageAlert from './components/MessageAlert.vue'
 import ConcurrencySelector from './components/ConcurrencySelector.vue'
 import TimeoutSelector from './components/TimeoutSelector.vue'
 import ValidationProgress from './components/ValidationProgress.vue'
+import FeedbackButton from './components/FeedbackButton.vue'
 import ThemeToggle from './components/ThemeToggle.vue'
 import FilterOptions from './components/FilterOptions.vue'
 import BatchProcessor from './components/BatchProcessor.vue'
@@ -1396,6 +1402,19 @@ function handleExportFailed() {
   flex: 1 1 260px;
 }
 
+.mobile-session-warning {
+  max-width: 720px;
+  margin: -4px auto 16px;
+  padding: 10px 12px;
+  border: 1px solid rgba(230, 162, 60, 0.35);
+  border-radius: 8px;
+  background: rgba(230, 162, 60, 0.1);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+}
+
 /* 空状态提示 */
 .empty-hint {
   margin-top: 8px;
@@ -1434,6 +1453,33 @@ function handleExportFailed() {
   background: var(--bg-tertiary);
   color: #409eff;
   font-weight: 500;
+}
+
+@media (max-width: 575px) {
+  .settings-section {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    align-items: stretch;
+  }
+
+  .settings-section > * {
+    min-width: 0;
+    flex: none;
+  }
+
+  .settings-section > .filter-options {
+    grid-column: 1 / -1;
+  }
+
+  .settings-section > .concurrency-selector,
+  .settings-section > .timeout-selector {
+    justify-content: center;
+    padding: 10px 8px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+  }
 }
 
 /* 清除按钮 */
@@ -1535,15 +1581,6 @@ function handleExportFailed() {
     flex: 1 1 calc(50% - 6px);
     padding: 8px 16px;
     font-size: 13px;
-  }
-
-  .settings-section {
-    align-items: stretch;
-  }
-
-  .settings-section > * {
-    flex-basis: 100%;
-    width: 100%;
   }
 
   .rule-type-numbers {

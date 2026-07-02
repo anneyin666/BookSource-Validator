@@ -43,12 +43,17 @@ defineEmits(['dedup', 'full-validate'])
   margin: 24px 0;
 }
 
+.action-buttons .el-button + .el-button {
+  margin-left: 0;
+}
+
 .action-buttons .el-button {
   display: flex;
   flex-direction: column;
   align-items: center;
   padding: 16px 32px;
   height: auto;
+  min-width: 160px;
 }
 
 .btn-icon {
@@ -64,8 +69,26 @@ defineEmits(['dedup', 'full-validate'])
 
 @media (max-width: 576px) {
   .action-buttons {
-    flex-direction: column;
-    align-items: center;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin: 16px 0;
+  }
+
+  .action-buttons .el-button {
+    width: 100%;
+    min-width: 0;
+    padding: 12px 6px;
+  }
+
+  .btn-icon {
+    font-size: 20px;
+    margin-bottom: 6px;
+  }
+
+  .btn-hint {
+    font-size: 11px;
+    white-space: nowrap;
   }
 }
 </style>

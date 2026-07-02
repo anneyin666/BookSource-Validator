@@ -1,7 +1,10 @@
 <template>
   <div class="concurrency-selector">
-    <label class="selector-label">并发数：</label>
-    <el-select v-model="selectedConcurrency" size="default" style="width: 100px">
+    <label class="selector-label">
+      <span class="label-full">并发数：</span>
+      <span class="label-short">并发：</span>
+    </label>
+    <el-select v-model="selectedConcurrency" size="default" class="concurrency-select">
       <el-option
         v-for="option in options"
         :key="option.value"
@@ -56,13 +59,47 @@ watch(() => props.modelValue, (newVal) => {
 
 .selector-label {
   font-size: 14px;
-  color: #606266;
+  color: var(--text-secondary);
   white-space: nowrap;
+}
+
+.label-short {
+  display: none;
 }
 
 .help-icon {
   color: #909399;
   cursor: help;
   font-size: 16px;
+}
+
+.concurrency-select {
+  width: 100px;
+}
+
+@media (max-width: 575px) {
+  .concurrency-selector {
+    gap: 6px;
+  }
+
+  .selector-label {
+    font-size: 13px;
+  }
+
+  .label-full {
+    display: none;
+  }
+
+  .label-short {
+    display: inline;
+  }
+
+  .help-icon {
+    display: none;
+  }
+
+  .concurrency-select {
+    width: 96px;
+  }
 }
 </style>

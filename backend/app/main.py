@@ -35,6 +35,17 @@ app.include_router(router, prefix="/api")
 # 生产环境：静态文件服务
 # 前端构建后的 dist 目录路径
 FRONTEND_DIST = Path(__file__).parent.parent.parent / "frontend" / "dist"
+INDEX_CACHE_HEADERS = {
+    # Avoid stale HTML pointing at removed hashed assets after a rebuild.
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+
+
+def serve_index_html() -> FileResponse:
+    """Return the SPA entry with cache disabled."""
+    return FileResponse(str(FRONTEND_DIST / "index.html"), headers=INDEX_CACHE_HEADERS)
 
 # 检查是否为生产环境（dist 目录存在）
 if FRONTEND_DIST.exists() and FRONTEND_DIST.is_dir():
@@ -60,7 +71,7 @@ if FRONTEND_DIST.exists() and FRONTEND_DIST.is_dir():
         # 其他路由返回 index.html（SPA 路由）
         index_path = FRONTEND_DIST / "index.html"
         if index_path.exists():
-            return FileResponse(str(index_path))
+            return serve_index_html()
         return {"error": "File not found"}
 
 
@@ -69,7 +80,7 @@ if FRONTEND_DIST.exists() and FRONTEND_DIST.is_dir():
 async def root():
     # 生产环境下由 SPA 处理
     if FRONTEND_DIST.exists():
-        return FileResponse(str(FRONTEND_DIST / "index.html"))
+        return serve_index_html()
     return {
         "name": settings.APP_NAME,
         "version": "1.0.0",

@@ -1,6 +1,9 @@
 <template>
   <div class="timeout-selector">
-    <label class="timeout-label">⏱️ 超时时间：</label>
+    <label class="timeout-label">
+      <span class="label-full">⏱️ 超时时间：</span>
+      <span class="label-short">超时：</span>
+    </label>
     <el-select v-model="selectedTimeout" class="timeout-select" @change="handleChange">
       <el-option
         v-for="t in timeoutOptions"
@@ -45,11 +48,37 @@ function handleChange(val) {
 
 .timeout-label {
   font-size: 14px;
-  color: #606266;
+  color: var(--text-secondary);
   white-space: nowrap;
+}
+
+.label-short {
+  display: none;
 }
 
 .timeout-select {
   width: 100px;
+}
+
+@media (max-width: 575px) {
+  .timeout-selector {
+    gap: 6px;
+  }
+
+  .timeout-label {
+    font-size: 13px;
+  }
+
+  .label-full {
+    display: none;
+  }
+
+  .label-short {
+    display: inline;
+  }
+
+  .timeout-select {
+    width: 96px;
+  }
 }
 </style>

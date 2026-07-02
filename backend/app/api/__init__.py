@@ -1,5 +1,6 @@
 # API路由导出
 from fastapi import APIRouter
+from .feedback import router as feedback_router
 from .health import router as health_router
 from .sources import router as sources_router
 
@@ -8,6 +9,7 @@ router = APIRouter()
 
 # 注册子路由
 router.include_router(health_router, tags=["health"])
+router.include_router(feedback_router, tags=["feedback"])
 router.include_router(sources_router, tags=["sources"])
 
 __all__ = ["router"]

@@ -36,10 +36,11 @@ function truncateUrl(url) {
 <style scoped>
 .duplicate-urls {
   margin-top: 16px;
-  background: #fff8e6;
-  border: 1px solid #ffc107;
+  background: rgba(230, 162, 60, 0.08);
+  border: 1px solid rgba(230, 162, 60, 0.35);
   border-radius: 8px;
   overflow: hidden;
+  width: 100%;
 }
 
 .duplicate-header {
@@ -47,42 +48,42 @@ function truncateUrl(url) {
   align-items: center;
   padding: 12px 16px;
   cursor: pointer;
-  background: #fff3cd;
+  background: rgba(230, 162, 60, 0.14);
   transition: background 0.2s;
 }
 
 .duplicate-header:hover {
-  background: #ffe69c;
+  background: rgba(230, 162, 60, 0.22);
 }
 
 .header-icon {
   margin-right: 8px;
   font-size: 12px;
-  color: #856404;
+  color: #e6a23c;
 }
 
 .header-text {
   font-weight: 600;
-  color: #856404;
+  color: var(--text-primary);
   flex: 1;
 }
 
 .header-hint {
   font-size: 12px;
-  color: #997a00;
+  color: var(--text-muted);
 }
 
 .duplicate-list {
   max-height: 300px;
   overflow-y: auto;
-  border-top: 1px solid #ffc107;
+  border-top: 1px solid rgba(230, 162, 60, 0.35);
 }
 
 .duplicate-item {
   display: flex;
   align-items: center;
   padding: 8px 16px;
-  border-bottom: 1px solid #f0e6c8;
+  border-bottom: 1px solid var(--border-light);
 }
 
 .duplicate-item:last-child {
@@ -104,7 +105,27 @@ function truncateUrl(url) {
 .duplicate-url {
   font-family: monospace;
   font-size: 13px;
-  color: #666;
+  color: var(--text-secondary);
   word-break: break-all;
+}
+
+@media (max-width: 576px) {
+  .duplicate-header {
+    gap: 6px;
+    padding: 12px;
+  }
+
+  .header-text {
+    font-size: 14px;
+  }
+
+  .header-hint {
+    display: none;
+  }
+
+  .duplicate-item {
+    align-items: flex-start;
+    padding: 10px 12px;
+  }
 }
 </style>

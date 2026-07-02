@@ -12,6 +12,15 @@ export async function healthCheck() {
 }
 
 /**
+ * 提交用户反馈
+ * @param {{message: string, contact?: string, page_url?: string, user_agent?: string, viewport?: string, theme?: string}} payload
+ */
+export async function submitFeedback(payload) {
+  const response = await axios.post(`${API_BASE}/feedback`, payload)
+  return response.data
+}
+
+/**
  * 解析上传的文件
  * @param {File} file - JSON文件
  * @param {string} mode - 操作模式: 'dedup'(只查重复) 或 'full'(全部校验)

@@ -31,10 +31,12 @@ const displayValue = computed(() => {
   flex-direction: column;
   align-items: center;
   padding: 24px 32px;
-  background: white;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
   border-radius: 8px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 12px var(--shadow-color);
   min-width: 120px;
+  transition: background-color 0.2s, border-color 0.2s, box-shadow 0.2s;
 }
 
 .stats-card.theme-primary .stats-value {
@@ -58,6 +60,31 @@ const displayValue = computed(() => {
 
 .stats-label {
   font-size: 14px;
-  color: #909399;
+  color: var(--text-muted);
+}
+
+@media (max-width: 576px) {
+  .stats-card {
+    min-width: 0;
+    width: 100%;
+    padding: 18px 10px;
+  }
+
+  .stats-card.stat-card-main .stats-value {
+    font-size: 32px;
+  }
+
+  .stats-card.stat-card-secondary {
+    padding: 16px 6px;
+  }
+
+  .stats-card.stat-card-secondary .stats-value {
+    font-size: 28px;
+  }
+
+  .stats-label {
+    font-size: 13px;
+    white-space: nowrap;
+  }
 }
 </style>
