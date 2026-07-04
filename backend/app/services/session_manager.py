@@ -16,12 +16,17 @@ class ValidationSession:
     invalid: int = 0
     current_url: str = ""
     current_name: str = ""  # 当前处理的书源名称
-    status: str = "pending"  # pending, running, completed, cancelled
+    status: str = "pending"  # pending, running, paused, completed, cancelled, error
     result: Optional[Dict] = None
     # 存储校验数据
     sources: List[dict] = field(default_factory=list)
     concurrency: int = 16
     timeout: int = 30
+    validation_mode: str = "balanced"
+    smart_enabled: bool = True
+    max_retries: int = 2
+    current_concurrency: int = 16
+    current_timeout: int = 30
     # 最终结果
     valid_sources: List[dict] = field(default_factory=list)
     failed_sources: Dict[str, List[dict]] = field(default_factory=dict)
@@ -48,7 +53,15 @@ class SessionManager:
         self._sessions: Dict[str, ValidationSession] = {}
         self._lock = asyncio.Lock()
 
-    async def create_session(self, sources: List[dict], concurrency: int = 16, timeout: int = 30) -> str:
+    async def create_session(
+        self,
+        sources: List[dict],
+        concurrency: int = 16,
+        timeout: int = 30,
+        validation_mode: str = "balanced",
+        smart_enabled: bool = True,
+        max_retries: int = 2,
+    ) -> str:
         """创建新会话"""
         session_id = str(uuid.uuid4())[:8]
         session = ValidationSession(
@@ -57,6 +70,11 @@ class SessionManager:
             sources=sources,
             concurrency=concurrency,
             timeout=timeout,
+            validation_mode=validation_mode,
+            smart_enabled=smart_enabled,
+            max_retries=max_retries,
+            current_concurrency=concurrency,
+            current_timeout=timeout,
             start_time=time.time()  # 记录开始时间
         )
         async with self._lock:
@@ -87,6 +105,20 @@ class SessionManager:
                 session.status = "completed"
                 session.valid_sources = valid_sources
                 session.failed_sources = failed_sources
+
+    async def pause_session(self, session_id: str):
+        """暂停会话。已发出的请求不强制中断，后续队列暂停启动。"""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session and session.status == "running":
+                session.status = "paused"
+
+    async def resume_session(self, session_id: str):
+        """恢复已暂停会话。"""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session and session.status == "paused":
+                session.status = "running"
 
     async def cancel_session(self, session_id: str):
         """取消会话"""

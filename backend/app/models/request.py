@@ -7,8 +7,10 @@ class UrlParseRequest(BaseModel):
     """URL解析请求"""
     url: str
     mode: Literal["dedup", "full"] = "dedup"
-    concurrency: int = Field(default=16, ge=1, le=32, description="并发数")
-    timeout: int = Field(default=30, description="超时时间（秒）")
+    concurrency: int = Field(default=16, ge=1, le=64, description="并发数")
+    timeout: int = Field(default=30, ge=5, le=120, description="超时时间（秒）")
+    validation_mode: Literal["fast", "balanced", "stable", "custom"] = "balanced"
+    smart_enabled: bool = True
     filter_types: str = Field(default="", description="过滤类型（逗号分隔）")
 
 
@@ -16,8 +18,10 @@ class ValidateStartRequest(BaseModel):
     """开始深度校验请求"""
     sources: List[dict]
     sessionId: Optional[str] = None
-    concurrency: int = Field(default=16, ge=1, le=32, description="并发数")
-    timeout: int = Field(default=30, description="超时时间（秒）")
+    concurrency: int = Field(default=16, ge=1, le=64, description="并发数")
+    timeout: int = Field(default=30, ge=5, le=120, description="超时时间（秒）")
+    validation_mode: Literal["fast", "balanced", "stable", "custom"] = "balanced"
+    smart_enabled: bool = True
 
 
 class ValidateCancelRequest(BaseModel):

@@ -85,8 +85,11 @@
 
         <!-- 设置区域 -->
         <div v-if="(hasFile || hasUrlData) && !state.loading && !state.validating && !state.sourceData" class="settings-section">
-          <ConcurrencySelector v-model="concurrency" />
-          <TimeoutSelector v-model="timeout" />
+          <ValidationPresetSelector v-model="validationMode" @apply="applyValidationPreset" />
+          <div v-if="validationMode === 'custom'" class="custom-strategy-fields">
+            <ConcurrencySelector v-model="concurrency" />
+            <TimeoutSelector v-model="timeout" />
+          </div>
           <FilterOptions v-model="filterTypes" />
         </div>
       </template>
@@ -104,8 +107,11 @@
 
         <!-- 设置区域（批量模式也显示） -->
         <div v-if="!state.loading && !state.validating && !state.sourceData" class="settings-section">
-          <ConcurrencySelector v-model="concurrency" />
-          <TimeoutSelector v-model="timeout" />
+          <ValidationPresetSelector v-model="validationMode" @apply="applyValidationPreset" />
+          <div v-if="validationMode === 'custom'" class="custom-strategy-fields">
+            <ConcurrencySelector v-model="concurrency" />
+            <TimeoutSelector v-model="timeout" />
+          </div>
           <FilterOptions v-model="filterTypes" />
         </div>
       </template>
@@ -145,6 +151,10 @@
         :current-name="progressData.currentName"
         :elapsed-time="elapsedTime"
         :estimated-remaining="progressData.estimatedRemaining || 0"
+        :status="progressData.status || 'running'"
+        :strategy="progressData.strategy || null"
+        @pause="handlePauseValidation"
+        @resume="handleResumeValidation"
         @cancel="handleCancelValidation"
       />
 
@@ -224,9 +234,17 @@
             </div>
           </div>
           <!-- 导出失败书源按钮 -->
-          <button class="export-failed-btn" @click="handleExportFailed">
-            📥 导出失败书源
-          </button>
+          <div class="failed-actions">
+            <button class="retry-failed-btn" @click="handleRetryFailed(false)">
+              🔁 重试全部失败
+            </button>
+            <button class="retry-network-btn" @click="handleRetryFailed(true)">
+              🌐 仅重试网络/超时
+            </button>
+            <button class="export-failed-btn" @click="handleExportFailed">
+              📥 导出失败书源
+            </button>
+          </div>
         </div>
 
         <DownloadButton
@@ -291,6 +309,7 @@ import DownloadButton from './components/DownloadButton.vue'
 import MessageAlert from './components/MessageAlert.vue'
 import ConcurrencySelector from './components/ConcurrencySelector.vue'
 import TimeoutSelector from './components/TimeoutSelector.vue'
+import ValidationPresetSelector from './components/ValidationPresetSelector.vue'
 import ValidationProgress from './components/ValidationProgress.vue'
 import FeedbackButton from './components/FeedbackButton.vue'
 import ThemeToggle from './components/ThemeToggle.vue'
@@ -300,7 +319,7 @@ import SearchValidator from './components/SearchValidator.vue'
 import FailedSources from './components/FailedSources.vue'
 import { useSources } from './composables/useSources.js'
 import { useToast } from './composables/useToast.js'
-import { parseFile, parseUrl, startValidation, startValidationFromData, getProgressEventSource, getSearchProgressEventSource, cancelValidation, startBatchFilesValidation, startBatchUrlsValidation, parseBatchFiles, parseBatchUrls, startSearchValidation, createBookSourceExport } from './api/sources.js'
+import { parseFile, parseUrl, startValidation, startValidationFromData, getProgressEventSource, getSearchProgressEventSource, cancelValidation, pauseValidation, resumeValidation, startBatchFilesValidation, startBatchUrlsValidation, parseBatchFiles, parseBatchUrls, startSearchValidation, startSearchValidationFromData, createBookSourceExport } from './api/sources.js'
 import { downloadJson, formatDate, buildAbsoluteUrl, buildLegadoImportUrl, openExternalUrl } from './utils/download.js'
 import { ref, computed, onMounted, watch, onUnmounted } from 'vue'
 
@@ -326,6 +345,7 @@ const { showSuccess, showError, showWarning, showInfo } = useToast()
 // 设置（从localStorage读取）
 const concurrency = ref(16)
 const timeout = ref(30)
+const validationMode = ref('balanced')
 const filterTypes = ref([])
 const expandedGroups = ref({})
 const urlInput = ref('')
@@ -351,6 +371,11 @@ const legadoExportExpireText = computed(() => {
 const progressData = ref(null)
 const sessionId = ref(null)
 const startResultData = ref(null)
+const retryContext = ref(null)
+const lastSearchConfig = ref({
+  validateType: 'search',
+  keyword: '玄幻'
+})
 let eventSource = null
 
 // 耗时计算
@@ -367,6 +392,7 @@ onMounted(() => {
   const savedTimeout = localStorage.getItem('sourceTool_timeout')
   if (savedConcurrency) concurrency.value = parseInt(savedConcurrency)
   if (savedTimeout) timeout.value = parseInt(savedTimeout)
+  localStorage.removeItem('sourceTool_validationMode')
 
   // 全局粘贴事件监听
   document.addEventListener('paste', handleGlobalPaste)
@@ -413,6 +439,12 @@ function createEmptyLegadoExport() {
 
 function resetLegadoExport() {
   legadoExport.value = createEmptyLegadoExport()
+}
+
+function applyValidationPreset(preset) {
+  if (preset.value === 'custom') return
+  concurrency.value = preset.concurrency
+  timeout.value = preset.timeout
 }
 
 function getCachedLegadoExport() {
@@ -539,7 +571,7 @@ async function handleUrlFetch(url) {
   const filterTypesStr = filterTypes.value.join(',')
 
   try {
-    const result = await parseUrl(url, 'dedup', concurrency.value, timeout.value, filterTypesStr)
+    const result = await parseUrl(url, 'dedup', concurrency.value, timeout.value, filterTypesStr, validationMode.value)
 
     if (result.code !== 200) {
       showError(result.message)
@@ -575,7 +607,7 @@ async function handleDedupFile() {
   const filterTypesStr = filterTypes.value.join(',')
 
   try {
-    const result = await parseFile(state.file, 'dedup', concurrency.value, timeout.value, filterTypesStr)
+    const result = await parseFile(state.file, 'dedup', concurrency.value, timeout.value, filterTypesStr, validationMode.value)
 
     if (result.code !== 200) {
       showError(result.message)
@@ -634,7 +666,7 @@ async function handleFullValidateFile() {
   const filterTypesStr = filterTypes.value.join(',')
 
   try {
-    const startResult = await startValidation(state.file, concurrency.value, timeout.value, filterTypesStr)
+    const startResult = await startValidation(state.file, concurrency.value, timeout.value, filterTypesStr, validationMode.value)
 
     if (startResult.code !== 200) {
       showError(startResult.message)
@@ -702,8 +734,25 @@ async function handleFullValidateFile() {
         stopTimer()
         eventSource.close()
         setValidating(false)
-        progressData.value = null
-        showWarning('校验已取消')
+        if (data.validCount !== undefined) {
+          const startData = startResultData.value
+          setSourceData({
+            total: startData.total,
+            dedupCount: startData.dedupCount,
+            duplicates: startData.duplicates,
+            duplicateUrls: [],
+            formatInvalid: startData.formatInvalid,
+            deepInvalid: data.invalidCount,
+            validCount: data.validCount,
+            dedupedSources: data.validSources || [],
+            failedGroups: data.failedGroups || [],
+            failedCategories: data.failedCategories || {}
+          })
+          showWarning(`校验已取消，已保留 ${data.validCount} 条有效结果`)
+        } else {
+          progressData.value = null
+          showWarning('校验已取消')
+        }
         return
       }
 
@@ -714,7 +763,9 @@ async function handleFullValidateFile() {
         invalid: data.invalid,
         current: data.current,
         currentName: data.currentName || '',
-        estimatedRemaining: data.estimatedRemaining || 0
+        estimatedRemaining: data.estimatedRemaining || 0,
+        status: data.status || 'running',
+        strategy: data.strategy || null
       }
     }
 
@@ -754,7 +805,8 @@ async function handleFullValidateUrl() {
     const result = await startValidationFromData(
       urlSourceData.value.dedupedSources || [],
       concurrency.value,
-      timeout.value
+      timeout.value,
+      validationMode.value
     )
 
     if (result.code !== 200) {
@@ -810,8 +862,24 @@ async function handleFullValidateUrl() {
         stopTimer()
         eventSource.close()
         setValidating(false)
-        progressData.value = null
-        showWarning('校验已取消')
+        if (data.validCount !== undefined) {
+          setSourceData({
+            total: urlSourceData.value.total,
+            dedupCount: urlSourceData.value.dedupCount,
+            duplicates: urlSourceData.value.duplicates,
+            duplicateUrls: [],
+            formatInvalid: urlSourceData.value.formatInvalid,
+            deepInvalid: data.invalidCount,
+            validCount: data.validCount,
+            dedupedSources: data.validSources || [],
+            failedGroups: data.failedGroups || [],
+            failedCategories: data.failedCategories || {}
+          })
+          showWarning(`校验已取消，已保留 ${data.validCount} 条有效结果`)
+        } else {
+          progressData.value = null
+          showWarning('校验已取消')
+        }
         return
       }
 
@@ -822,7 +890,9 @@ async function handleFullValidateUrl() {
         invalid: data.invalid,
         current: data.current,
         currentName: data.currentName || '',
-        estimatedRemaining: data.estimatedRemaining || 0
+        estimatedRemaining: data.estimatedRemaining || 0,
+        status: data.status || 'running',
+        strategy: data.strategy || null
       }
     }
 
@@ -852,9 +922,9 @@ async function handleBatchProcess({ type, data, mode }) {
     try {
       let result
       if (type === 'files') {
-        result = await parseBatchFiles(data, 'dedup', concurrency.value, timeout.value, filterTypesStr)
+        result = await parseBatchFiles(data, 'dedup', concurrency.value, timeout.value, filterTypesStr, validationMode.value)
       } else {
-        result = await parseBatchUrls(data, 'dedup', concurrency.value, timeout.value, filterTypesStr)
+        result = await parseBatchUrls(data, 'dedup', concurrency.value, timeout.value, filterTypesStr, validationMode.value)
       }
 
       if (result.code !== 200) {
@@ -888,9 +958,9 @@ async function handleBatchProcess({ type, data, mode }) {
   try {
     let startResult
     if (type === 'files') {
-      startResult = await startBatchFilesValidation(data, concurrency.value, timeout.value, filterTypesStr)
+      startResult = await startBatchFilesValidation(data, concurrency.value, timeout.value, filterTypesStr, validationMode.value)
     } else {
-      startResult = await startBatchUrlsValidation(data, concurrency.value, timeout.value, filterTypesStr)
+      startResult = await startBatchUrlsValidation(data, concurrency.value, timeout.value, filterTypesStr, validationMode.value)
     }
 
     if (startResult.code !== 200) {
@@ -966,8 +1036,24 @@ async function handleBatchProcess({ type, data, mode }) {
         stopTimer()
         eventSource.close()
         setValidating(false)
-        progressData.value = null
-        showWarning('校验已取消')
+        if (data.validCount !== undefined) {
+          setSourceData({
+            total: data.totalOriginal || startResult.total,
+            dedupCount: data.dedupCount || startResult.deepTotal,
+            duplicates: data.duplicates || 0,
+            duplicateUrls: [],
+            formatInvalid: data.formatInvalid || 0,
+            deepInvalid: data.invalidCount,
+            validCount: data.validCount,
+            dedupedSources: data.validSources || [],
+            failedGroups: data.failedGroups || [],
+            failedCategories: data.failedCategories || {}
+          })
+          showWarning(`校验已取消，已保留 ${data.validCount} 条有效结果`)
+        } else {
+          progressData.value = null
+          showWarning('校验已取消')
+        }
         return
       }
 
@@ -978,7 +1064,9 @@ async function handleBatchProcess({ type, data, mode }) {
         invalid: data.invalid,
         current: data.current,
         currentName: data.currentName || '',
-        estimatedRemaining: data.estimatedRemaining || 0
+        estimatedRemaining: data.estimatedRemaining || 0,
+        status: data.status || 'running',
+        strategy: data.strategy || null
       }
     }
 
@@ -1002,15 +1090,37 @@ async function handleCancelValidation() {
 
   try {
     await cancelValidation(sessionId.value)
-    if (eventSource) {
-      eventSource.close()
-    }
-    stopTimer()
-    setValidating(false)
-    progressData.value = null
-    showWarning('校验已取消')
+    showWarning('正在取消校验，已完成结果会保留...')
   } catch (err) {
     showError('取消失败')
+  }
+}
+
+async function handlePauseValidation() {
+  if (!sessionId.value) return
+
+  try {
+    await pauseValidation(sessionId.value)
+    if (progressData.value) {
+      progressData.value.status = 'paused'
+    }
+    showInfo('校验已暂停，已发出的请求会先完成')
+  } catch (err) {
+    showError('暂停失败')
+  }
+}
+
+async function handleResumeValidation() {
+  if (!sessionId.value) return
+
+  try {
+    await resumeValidation(sessionId.value)
+    if (progressData.value) {
+      progressData.value.status = 'running'
+    }
+    showInfo('校验已继续')
+  } catch (err) {
+    showError('继续失败')
   }
 }
 
@@ -1020,7 +1130,7 @@ async function handleSearchValidation(payload) {
   console.log('payload:', payload)
   console.log('state.file:', state.file)
 
-  const { validateType, keyword, concurrency: searchConcurrency, timeout: searchTimeout } = payload
+  const { validateType, keyword, concurrency: searchConcurrency, timeout: searchTimeout, validationMode: searchValidationMode } = payload
 
   if (!state.file) {
     console.error('state.file 为空，无法开始校验')
@@ -1029,6 +1139,7 @@ async function handleSearchValidation(payload) {
   }
 
   console.log('开始搜索校验，参数:', { validateType, keyword, searchConcurrency, searchTimeout })
+  lastSearchConfig.value = { validateType, keyword }
 
   setValidating(true)
   setError(null)
@@ -1041,7 +1152,8 @@ async function handleSearchValidation(payload) {
       keyword,
       validateType,
       searchConcurrency || 16,
-      searchTimeout || 30
+      searchTimeout || 30,
+      searchValidationMode || validationMode.value
     )
 
     console.log('startSearchValidation 返回结果:', startResult)
@@ -1127,8 +1239,25 @@ async function handleSearchValidation(payload) {
         stopTimer()
         eventSource.close()
         setValidating(false)
-        progressData.value = null
-        showWarning('校验已取消')
+        if (data.validCount !== undefined) {
+          setSourceData({
+            total: startResult.total,
+            dedupCount: startResult.total,
+            duplicates: 0,
+            duplicateUrls: [],
+            formatInvalid: 0,
+            deepInvalid: data.invalidCount,
+            validCount: data.validCount,
+            dedupedSources: data.validSources || [],
+            failedGroups: data.failedGroups || [],
+            failedCategories: data.failedCategories || {},
+            ruleTypeStats: data.ruleTypeStats || null
+          })
+          showWarning(`校验已取消，已保留 ${data.validCount} 条有效结果`)
+        } else {
+          progressData.value = null
+          showWarning('校验已取消')
+        }
         return
       }
 
@@ -1139,7 +1268,9 @@ async function handleSearchValidation(payload) {
         invalid: data.invalid,
         current: data.current,
         currentName: data.currentName || '',
-        estimatedRemaining: data.estimatedRemaining || 0
+        estimatedRemaining: data.estimatedRemaining || 0,
+        status: data.status || 'running',
+        strategy: data.strategy || null
       }
     }
 
@@ -1183,6 +1314,179 @@ async function handleExportToLegado() {
 
   openExternalUrl(exportInfo.legadoUrl)
   showInfo('已尝试唤起阅读 App；若未自动跳转，请确认已安装阅读，并尝试打开下方临时链接。')
+}
+
+function isNetworkRetryReason(reason) {
+  const keywords = ['超时', '连接失败', '连接超时', '读取错误', '写入错误', '读取超时', '写入超时', '网络错误', 'SSL', '服务器断开', '协议错误']
+  return keywords.some((keyword) => String(reason || '').includes(keyword))
+}
+
+function normalizeFailedSource(source) {
+  const bookSourceUrl = source.bookSourceUrl || source.url || ''
+  if (!bookSourceUrl) return null
+  return {
+    ...source,
+    bookSourceUrl,
+    bookSourceName: source.bookSourceName || source.name || '未命名'
+  }
+}
+
+function collectFailedSources(onlyNetwork) {
+  const groups = state.sourceData?.failedGroups || []
+  const retrySources = []
+  const skippedGroups = []
+
+  for (const group of groups) {
+    const shouldRetry = !onlyNetwork || isNetworkRetryReason(group.reason)
+    if (!shouldRetry) {
+      skippedGroups.push(group)
+      continue
+    }
+
+    for (const source of group.sources || []) {
+      const normalized = normalizeFailedSource(source)
+      if (normalized) retrySources.push(normalized)
+    }
+  }
+
+  return { retrySources, skippedGroups }
+}
+
+function mergeRetryResult(data, skippedGroups = []) {
+  const previous = retryContext.value?.previous
+  if (!previous) return
+
+  const sourceMap = new Map()
+  for (const source of previous.dedupedSources || []) {
+    const url = source.bookSourceUrl || source.url
+    if (url) sourceMap.set(url, source)
+  }
+  for (const source of data.validSources || []) {
+    const url = source.bookSourceUrl || source.url
+    if (url) sourceMap.set(url, source)
+  }
+
+  const failedGroups = [
+    ...(data.failedGroups || []),
+    ...skippedGroups
+  ].filter((group) => group.count > 0)
+  const failedCount = failedGroups.reduce((sum, group) => sum + (group.count || 0), 0)
+  const validSources = Array.from(sourceMap.values())
+
+  setSourceData({
+    ...previous,
+    deepInvalid: failedCount,
+    validCount: validSources.length,
+    dedupedSources: validSources,
+    failedGroups,
+    failedCategories: data.failedCategories || previous.failedCategories || {},
+    ruleTypeStats: data.ruleTypeStats || previous.ruleTypeStats || null
+  })
+}
+
+async function handleRetryFailed(onlyNetwork) {
+  const { retrySources, skippedGroups } = collectFailedSources(onlyNetwork)
+  if (retrySources.length === 0) {
+    showWarning(onlyNetwork ? '没有可重试的网络/超时失败项' : '没有可重试的失败项')
+    return
+  }
+
+  retryContext.value = {
+    previous: state.sourceData,
+    skippedGroups,
+    onlyNetwork,
+    isSearch: processMode.value === 'search'
+  }
+
+  setValidating(true)
+  progressData.value = {
+    processed: 0,
+    total: retrySources.length,
+    valid: 0,
+    invalid: 0,
+    current: '',
+    currentName: '',
+    estimatedRemaining: 0,
+    status: 'running'
+  }
+
+  try {
+    let startResult
+    if (processMode.value === 'search') {
+      startResult = await startSearchValidationFromData(
+        retrySources,
+        lastSearchConfig.value.keyword,
+        lastSearchConfig.value.validateType,
+        concurrency.value,
+        timeout.value,
+        validationMode.value
+      )
+    } else {
+      startResult = await startValidationFromData(
+        retrySources,
+        concurrency.value,
+        timeout.value,
+        validationMode.value
+      )
+    }
+
+    if (startResult.code !== 200) {
+      showError(startResult.message)
+      setValidating(false)
+      return
+    }
+
+    sessionId.value = startResult.sessionId
+    startTimer()
+    eventSource = processMode.value === 'search'
+      ? getSearchProgressEventSource(sessionId.value)
+      : getProgressEventSource(sessionId.value)
+
+    eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data)
+      if (data.error) {
+        stopTimer()
+        eventSource.close()
+        setValidating(false)
+        showError(data.error)
+        return
+      }
+
+      if ((data.status === 'completed' || data.status === 'cancelled') && data.validCount !== undefined) {
+        stopTimer()
+        eventSource.close()
+        setValidating(false)
+        mergeRetryResult(data, skippedGroups)
+        retryContext.value = null
+        const prefix = data.status === 'cancelled' ? '重试已取消' : '重试完成'
+        showSuccess(`${prefix}，新增/保留有效 ${data.validCount} 条，仍失败 ${data.invalidCount || 0} 条`)
+        return
+      }
+
+      progressData.value = {
+        processed: data.processed,
+        total: data.total,
+        valid: data.valid,
+        invalid: data.invalid,
+        current: data.current,
+        currentName: data.currentName || '',
+        estimatedRemaining: data.estimatedRemaining || 0,
+        status: data.status || 'running',
+        strategy: data.strategy || null
+      }
+    }
+
+    eventSource.onerror = () => {
+      stopTimer()
+      eventSource.close()
+      setValidating(false)
+      showError('重试连接中断，请稍后再试')
+    }
+  } catch (err) {
+    stopTimer()
+    setValidating(false)
+    showError('重试失败，请稍后再试')
+  }
 }
 
 // 导出失败书源
@@ -1372,17 +1676,44 @@ function handleExportFailed() {
   word-break: break-all;
 }
 
-.export-failed-btn {
+.failed-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
   margin-top: 16px;
+}
+
+.export-failed-btn,
+.retry-failed-btn,
+.retry-network-btn {
   width: 100%;
   padding: 10px;
-  background: #ef5350;
   color: white;
   border: none;
   border-radius: 6px;
   cursor: pointer;
   font-size: 14px;
   transition: background 0.2s;
+}
+
+.retry-failed-btn {
+  background: #409eff;
+}
+
+.retry-network-btn {
+  background: #67c23a;
+}
+
+.export-failed-btn {
+  background: #ef5350;
+}
+
+.retry-failed-btn:hover {
+  background: #337ecc;
+}
+
+.retry-network-btn:hover {
+  background: #529b2e;
 }
 
 .export-failed-btn:hover {
@@ -1400,6 +1731,17 @@ function handleExportFailed() {
 
 .settings-section > * {
   flex: 1 1 260px;
+}
+
+.settings-section > .preset-selector {
+  flex-basis: 100%;
+}
+
+.custom-strategy-fields {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  flex: 1 1 220px;
 }
 
 .mobile-session-warning {
@@ -1472,8 +1814,20 @@ function handleExportFailed() {
     grid-column: 1 / -1;
   }
 
+  .settings-section > .preset-selector {
+    grid-column: 1 / -1;
+  }
+
+  .custom-strategy-fields {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .settings-section > .concurrency-selector,
-  .settings-section > .timeout-selector {
+  .settings-section > .timeout-selector,
+  .custom-strategy-fields > .concurrency-selector,
+  .custom-strategy-fields > .timeout-selector {
     justify-content: center;
     padding: 10px 8px;
     background: var(--card-bg);
@@ -1601,6 +1955,10 @@ function handleExportFailed() {
 
   .failed-count {
     margin-right: 0;
+  }
+
+  .failed-actions {
+    grid-template-columns: 1fr;
   }
 
   .mobile-export-panel {

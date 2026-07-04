@@ -6,6 +6,7 @@ from typing import List, Tuple, Optional, Callable
 from datetime import datetime
 
 from app.config import settings
+from app.services.validation_strategy import get_retry_delay
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +21,10 @@ class ValidatorService:
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     }
 
-    # 支持的并发数选项
-    CONCURRENCY_OPTIONS = [1, 4, 8, 16, 32]
-
-    # 支持的超时选项
-    TIMEOUT_OPTIONS = settings.TIMEOUT_OPTIONS
+    MIN_CONCURRENCY = 1
+    MAX_CONCURRENCY = 64
+    MIN_TIMEOUT = 5
+    MAX_TIMEOUT = 120
 
     @staticmethod
     def is_format_valid(source: dict) -> bool:
@@ -65,7 +65,8 @@ class ValidatorService:
     async def validate_source_access(
         url: str,
         timeout: int = None,
-        client: Optional[httpx.AsyncClient] = None
+        client: Optional[httpx.AsyncClient] = None,
+        max_retries: Optional[int] = None
     ) -> Tuple[bool, str]:
         """
         深度校验单个书源
@@ -79,12 +80,18 @@ class ValidatorService:
         """
         if timeout is None:
             timeout = settings.VALIDATE_TIMEOUT
+        if max_retries is None:
+            max_retries = settings.MAX_RETRIES
 
         async def do_request(client: httpx.AsyncClient) -> Tuple[bool, str]:
             """执行请求，返回 (是否有效, 原因)"""
             # 先尝试 HEAD 请求（更快）
             try:
-                response = await client.head(url, headers=ValidatorService.REQUEST_HEADERS)
+                response = await client.head(
+                    url,
+                    headers=ValidatorService.REQUEST_HEADERS,
+                    timeout=timeout,
+                )
                 # 403 可能是 Cloudflare 防护，视为有效
                 if response.status_code == 403:
                     return True, "403-ignored"
@@ -102,7 +109,8 @@ class ValidatorService:
                     "GET",
                     url,
                     headers=ValidatorService.REQUEST_HEADERS,
-                    follow_redirects=True
+                    follow_redirects=True,
+                    timeout=timeout,
                 ) as response:
                     # 只需要状态码判断可访问性，不下载正文，避免小带宽服务器被页面内容拖慢。
                     if response.status_code == 403:
@@ -132,38 +140,38 @@ class ValidatorService:
 
         async def validate_with_client(request_client: httpx.AsyncClient) -> Tuple[bool, str]:
             # 重试机制
-            for attempt in range(settings.MAX_RETRIES + 1):
+            for attempt in range(max_retries + 1):
                 try:
                     is_valid, reason = await do_request(request_client)
                     if is_valid:
                         return True, ""
 
                     # 如果是最后一次尝试，直接返回失败
-                    if attempt == settings.MAX_RETRIES:
+                    if attempt == max_retries:
                         logger.debug(f"校验失败 {url}: {reason}")
                         return False, reason
 
                     # 网络错误时重试
                     if reason in ["超时", "连接超时", "连接失败", "读取错误", "写入错误"]:
-                        logger.debug(f"重试 {attempt + 1}/{settings.MAX_RETRIES} {url}: {reason}")
-                        await asyncio.sleep(settings.RETRY_DELAY)
+                        logger.debug(f"重试 {attempt + 1}/{max_retries} {url}: {reason}")
+                        await asyncio.sleep(get_retry_delay(attempt, settings.RETRY_DELAY))
                         continue
 
                     return False, reason
 
                 except httpx.TimeoutException:
-                    if attempt == settings.MAX_RETRIES:
+                    if attempt == max_retries:
                         return False, "超时"
-                    await asyncio.sleep(settings.RETRY_DELAY)
+                    await asyncio.sleep(get_retry_delay(attempt, settings.RETRY_DELAY))
                 except httpx.ConnectError:
-                    if attempt == settings.MAX_RETRIES:
+                    if attempt == max_retries:
                         return False, "连接失败"
-                    await asyncio.sleep(settings.RETRY_DELAY)
+                    await asyncio.sleep(get_retry_delay(attempt, settings.RETRY_DELAY))
                 except Exception as e:
                     logger.debug(f"校验异常 {url}: {type(e).__name__}: {str(e)}")
-                    if attempt == settings.MAX_RETRIES:
+                    if attempt == max_retries:
                         return False, type(e).__name__
-                    await asyncio.sleep(settings.RETRY_DELAY)
+                    await asyncio.sleep(get_retry_delay(attempt, settings.RETRY_DELAY))
 
             return False, "重试耗尽"
 
@@ -222,6 +230,7 @@ class ValidatorService:
         sources: List[dict],
         concurrency: int = 16,
         timeout: int = 30,
+        max_retries: Optional[int] = None,
         progress_callback: Optional[Callable[[int, int, str, int, int], None]] = None
     ) -> Tuple[List[dict], int, List[dict]]:
         """
@@ -236,13 +245,14 @@ class ValidatorService:
         Returns:
             (有效的书源列表, 失效数量, 失败书源分组列表)
         """
-        # 限制并发数在有效范围内
-        if concurrency not in ValidatorService.CONCURRENCY_OPTIONS:
-            concurrency = 16
-
-        # 限制超时时间在有效范围内
-        if timeout not in ValidatorService.TIMEOUT_OPTIONS:
-            timeout = 30
+        concurrency = max(
+            ValidatorService.MIN_CONCURRENCY,
+            min(ValidatorService.MAX_CONCURRENCY, int(concurrency or 16)),
+        )
+        timeout = max(
+            ValidatorService.MIN_TIMEOUT,
+            min(ValidatorService.MAX_TIMEOUT, int(timeout or 30)),
+        )
 
         valid = []
         failed_sources = {}  # {reason: [source_info]}
@@ -261,7 +271,12 @@ class ValidatorService:
                 name = source.get('bookSourceName', '')
 
                 async with semaphore:
-                    is_valid, reason = await ValidatorService.validate_source_access(url, timeout, client=client)
+                    is_valid, reason = await ValidatorService.validate_source_access(
+                        url,
+                        timeout,
+                        client=client,
+                        max_retries=max_retries,
+                    )
 
                     async with lock:
                         processed += 1
@@ -270,11 +285,14 @@ class ValidatorService:
                         else:
                             if reason not in failed_sources:
                                 failed_sources[reason] = []
-                            failed_sources[reason].append({
+                            failed_source = source.copy()
+                            failed_source.update({
                                 'url': url,
                                 'name': name,
-                                'reason': reason
+                                'reason': reason,
+                                '_failureReason': reason,
                             })
+                            failed_sources[reason].append(failed_source)
                             logger.debug(f"无效书源 [{processed}/{total}]: {url} - {reason}")
 
                         if progress_callback:

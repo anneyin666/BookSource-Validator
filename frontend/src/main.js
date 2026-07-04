@@ -6,6 +6,7 @@ import {
   ElCheckboxGroup,
   ElIcon,
   ElInput,
+  ElInputNumber,
   ElMessage,
   ElOption,
   ElProgress,
@@ -24,6 +25,7 @@ app.use(ElCheckbox)
 app.use(ElCheckboxGroup)
 app.use(ElIcon)
 app.use(ElInput)
+app.use(ElInputNumber)
 app.use(ElOption)
 app.use(ElProgress)
 app.use(ElSelect)

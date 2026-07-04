@@ -1,17 +1,18 @@
 <template>
   <div class="timeout-selector">
-    <label class="timeout-label">
+    <label v-if="showLabel" class="timeout-label">
       <span class="label-full">⏱️ 超时时间：</span>
       <span class="label-short">超时：</span>
     </label>
-    <el-select v-model="selectedTimeout" class="timeout-select" @change="handleChange">
-      <el-option
-        v-for="t in timeoutOptions"
-        :key="t"
-        :label="`${t} 秒`"
-        :value="t"
-      />
-    </el-select>
+    <el-input-number
+      v-model="selectedTimeout"
+      :min="5"
+      :max="120"
+      :step="5"
+      controls-position="right"
+      class="timeout-select"
+    />
+    <span v-if="showUnit" class="timeout-unit">秒</span>
   </div>
 </template>
 
@@ -22,21 +23,28 @@ const props = defineProps({
   modelValue: {
     type: Number,
     default: 30
+  },
+  showLabel: {
+    type: Boolean,
+    default: true
+  },
+  showUnit: {
+    type: Boolean,
+    default: true
   }
 })
 
 const emit = defineEmits(['update:modelValue'])
 
-const timeoutOptions = [15, 30, 45, 60]
 const selectedTimeout = ref(props.modelValue)
 
 watch(() => props.modelValue, (val) => {
   selectedTimeout.value = val
 })
 
-function handleChange(val) {
+watch(selectedTimeout, (val) => {
   emit('update:modelValue', val)
-}
+})
 </script>
 
 <style scoped>
@@ -44,6 +52,7 @@ function handleChange(val) {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .timeout-label {
@@ -57,11 +66,19 @@ function handleChange(val) {
 }
 
 .timeout-select {
-  width: 100px;
+  width: 112px;
+  flex: 0 0 auto;
+}
+
+.timeout-unit {
+  color: var(--text-muted);
+  flex: 0 0 auto;
+  font-size: 13px;
 }
 
 @media (max-width: 575px) {
   .timeout-selector {
+    justify-content: center;
     gap: 6px;
   }
 
@@ -78,7 +95,7 @@ function handleChange(val) {
   }
 
   .timeout-select {
-    width: 96px;
+    width: 104px;
   }
 }
 </style>

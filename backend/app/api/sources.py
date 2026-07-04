@@ -4,7 +4,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import Response, StreamingResponse
-from typing import List
+from typing import List, Optional
 import json
 import asyncio
 import time
@@ -21,8 +21,13 @@ from app.models import (
 from app.services import ParserService, DeduperService, ValidatorService, FilterService
 from app.services.export_store import export_store
 from app.services.session_manager import session_manager
-from app.services.search_validator import categorize_failed_sources, ERROR_CATEGORIES
+from app.services.search_validator import categorize_failed_sources
 from app.services.url_security import UrlSecurityService
+from app.services.validation_strategy import (
+    AdaptiveValidationController,
+    ValidationOptions,
+    normalize_validation_options,
+)
 from app.config import settings
 
 router = APIRouter()
@@ -105,21 +110,46 @@ def is_valid_source_file(filename: str) -> bool:
     return lower_name.endswith('.json') or lower_name.endswith('.txt')
 
 
-def validate_runtime_options(concurrency, timeout) -> tuple[int, int]:
-    """校验运行时参数。"""
-    try:
-        concurrency = int(concurrency)
-        timeout = int(timeout)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("并发数和超时时间必须为整数") from exc
+def validate_runtime_options(
+    concurrency,
+    timeout,
+    validation_mode: str = "custom",
+    smart_enabled=True,
+) -> ValidationOptions:
+    """校验并归一化运行时参数。"""
+    return normalize_validation_options(
+        concurrency=concurrency,
+        timeout=timeout,
+        mode=validation_mode,
+        smart_enabled=smart_enabled,
+    )
 
-    if concurrency not in ValidatorService.CONCURRENCY_OPTIONS:
-        raise ValueError("并发数仅支持 1/4/8/16/32")
 
-    if timeout not in ValidatorService.TIMEOUT_OPTIONS:
-        raise ValueError("超时时间仅支持 15/30/45/60 秒")
+def append_failed_source(failed_sources: dict, reason: str, source: dict, url: str, name: str) -> None:
+    """Append a failed source while preserving original source fields for retry/export."""
+    if reason not in failed_sources:
+        failed_sources[reason] = []
+    failed_source = source.copy()
+    failed_source.update({
+        "url": url,
+        "name": name,
+        "reason": reason,
+        "_failureReason": reason,
+    })
+    failed_sources[reason].append(failed_source)
 
-    return concurrency, timeout
+
+def build_failed_groups(failed_sources: dict) -> list:
+    """Build sorted failed groups from reason-indexed failed sources."""
+    failed_groups = []
+    for reason, sources_list in failed_sources.items():
+        failed_groups.append({
+            "reason": reason,
+            "count": len(sources_list),
+            "sources": sources_list
+        })
+    failed_groups.sort(key=lambda x: x["count"], reverse=True)
+    return failed_groups
 
 
 def build_empty_source_data(*, file_stats=None, url_stats=None) -> SourceData:
@@ -154,6 +184,8 @@ async def parse_file(
     mode: str = Form(default="dedup"),
     concurrency: int = Form(default=16),
     timeout: int = Form(default=30),
+    validation_mode: str = Form(default="custom"),
+    smart_enabled: bool = Form(default=True),
     filter_types: str = Form(default="")
 ):
     """
@@ -169,7 +201,7 @@ async def parse_file(
     logger.info(f"开始解析文件: {file.filename}, 模式: {mode}, 并发: {concurrency}, 超时: {timeout}, 过滤: {filter_types}")
 
     try:
-        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+        options = validate_runtime_options(concurrency, timeout, validation_mode, smart_enabled)
     except ValueError as exc:
         return ParseResponse(code=400, message=str(exc))
 
@@ -196,7 +228,7 @@ async def parse_file(
     filter_list = [f.strip() for f in filter_types.split(',') if f.strip()] if filter_types else []
 
     # 6. 处理书源
-    result = await process_sources(data, mode, concurrency, timeout, filter_list)
+    result = await process_sources(data, mode, options, filter_list)
     return ParseResponse(data=result)
 
 
@@ -211,7 +243,12 @@ async def parse_url(request: UrlParseRequest):
     logger.info(f"开始解析URL: {request.url}, 模式: {request.mode}, 并发: {request.concurrency}, 超时: {request.timeout}")
 
     try:
-        concurrency, timeout = validate_runtime_options(request.concurrency, request.timeout)
+        options = validate_runtime_options(
+            request.concurrency,
+            request.timeout,
+            request.validation_mode,
+            request.smart_enabled,
+        )
     except ValueError as exc:
         return ParseResponse(code=400, message=str(exc))
 
@@ -247,7 +284,7 @@ async def parse_url(request: UrlParseRequest):
     filter_list = request.filter_types.split(',') if request.filter_types else []
 
     # 5. 处理书源
-    result = await process_sources(data, request.mode, concurrency, timeout, filter_list)
+    result = await process_sources(data, request.mode, options, filter_list)
     return ParseResponse(data=result)
 
 
@@ -298,7 +335,12 @@ async def download_exported_book_source(export_id: str):
     )
 
 
-async def process_sources(data, mode: str = "dedup", concurrency: int = 16, timeout: int = 30, filter_types: list = None) -> SourceData:
+async def process_sources(
+    data,
+    mode: str = "dedup",
+    options: Optional[ValidationOptions] = None,
+    filter_types: list = None,
+) -> SourceData:
     """
     处理书源数据
 
@@ -314,6 +356,8 @@ async def process_sources(data, mode: str = "dedup", concurrency: int = 16, time
     """
     if filter_types is None:
         filter_types = []
+    if options is None:
+        options = validate_runtime_options(16, 30)
     started_at = time.perf_counter()
 
     # 步骤1：提取书源数组
@@ -346,7 +390,12 @@ async def process_sources(data, mode: str = "dedup", concurrency: int = 16, time
     final_valid = format_valid
 
     if mode == "full":
-        final_valid, deep_invalid, failed_groups = await ValidatorService.deep_validate(format_valid, concurrency, timeout)
+        final_valid, deep_invalid, failed_groups = await ValidatorService.deep_validate(
+            format_valid,
+            options.concurrency,
+            options.timeout,
+            max_retries=options.max_retries,
+        )
         logger.info(f"深度校验完成 - 有效: {len(final_valid)}, 失效: {deep_invalid}")
 
     # 步骤6：设置分组
@@ -364,8 +413,8 @@ async def process_sources(data, mode: str = "dedup", concurrency: int = 16, time
         format_invalid,
         deep_invalid,
         valid_count,
-        concurrency,
-        timeout,
+        options.concurrency,
+        options.timeout,
         elapsed,
     )
 
@@ -389,6 +438,8 @@ async def start_validation(
     file: UploadFile = File(...),
     concurrency: int = Form(default=16),
     timeout: int = Form(default=30),
+    validation_mode: str = Form(default="custom"),
+    smart_enabled: bool = Form(default=True),
     filter_types: str = Form(default="")
 ):
     """
@@ -399,7 +450,7 @@ async def start_validation(
     logger.info(f"开始SSE校验: {file.filename}, 并发: {concurrency}, 超时: {timeout}, 过滤: {filter_types}")
 
     try:
-        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+        options = validate_runtime_options(concurrency, timeout, validation_mode, smart_enabled)
     except ValueError as exc:
         return {"code": 400, "message": str(exc)}
 
@@ -436,7 +487,14 @@ async def start_validation(
     format_valid, format_invalid = ValidatorService.format_validate(deduped)
 
     # 7. 创建会话
-    session_id = await session_manager.create_session(format_valid, concurrency, timeout)
+    session_id = await session_manager.create_session(
+        format_valid,
+        options.concurrency,
+        options.timeout,
+        options.mode,
+        options.smart_enabled,
+        options.max_retries,
+    )
     logger.info(
         "SSE校验会话创建: session_id=%s total=%s dedup=%s duplicates=%s "
         "format_invalid=%s deep_total=%s concurrency=%s timeout=%s",
@@ -446,8 +504,8 @@ async def start_validation(
         duplicates,
         format_invalid,
         len(format_valid),
-        concurrency,
-        timeout,
+        options.concurrency,
+        options.timeout,
     )
 
     return {
@@ -458,6 +516,8 @@ async def start_validation(
         "duplicates": duplicates,
         "formatInvalid": format_invalid,
         "deepTotal": len(format_valid),
+        "validationMode": options.mode,
+        "smartEnabled": options.smart_enabled,
         "message": "会话创建成功"
     }
 
@@ -472,31 +532,42 @@ async def start_validation_from_data(request: dict):
     sources = request.get('sources', [])
     concurrency = request.get('concurrency', 16)
     timeout = request.get('timeout', 30)
+    validation_mode = request.get('validation_mode', 'custom')
+    smart_enabled = request.get('smart_enabled', True)
 
     try:
-        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+        options = validate_runtime_options(concurrency, timeout, validation_mode, smart_enabled)
     except ValueError as exc:
         return {"code": 400, "message": str(exc)}
 
-    logger.info(f"开始SSE校验(数据): 书源数: {len(sources)}, 并发: {concurrency}, 超时: {timeout}")
+    logger.info(f"开始SSE校验(数据): 书源数: {len(sources)}, 并发: {options.concurrency}, 超时: {options.timeout}")
 
     if not sources:
         return {"code": 400, "message": "书源数据为空"}
 
     # 创建会话
-    session_id = await session_manager.create_session(sources, concurrency, timeout)
+    session_id = await session_manager.create_session(
+        sources,
+        options.concurrency,
+        options.timeout,
+        options.mode,
+        options.smart_enabled,
+        options.max_retries,
+    )
     logger.info(
         "SSE数据校验会话创建: session_id=%s deep_total=%s concurrency=%s timeout=%s",
         session_id,
         len(sources),
-        concurrency,
-        timeout,
+        options.concurrency,
+        options.timeout,
     )
 
     return {
         "code": 200,
         "sessionId": session_id,
         "deepTotal": len(sources),
+        "validationMode": options.mode,
+        "smartEnabled": options.smart_enabled,
         "message": "会话创建成功"
     }
 
@@ -528,57 +599,89 @@ async def get_validation_progress(session_id: str):
                 failed_sources = {}
                 total = len(session.sources)
                 processed = 0
-                lock = asyncio.Lock()
-                semaphore = asyncio.Semaphore(session.concurrency)
+                pending_sources = list(session.sources)
+                running_tasks = set()
+                options = ValidationOptions(
+                    concurrency=session.concurrency,
+                    timeout=session.timeout,
+                    mode=session.validation_mode,
+                    smart_enabled=session.smart_enabled,
+                    max_retries=session.max_retries,
+                )
+                controller = AdaptiveValidationController(options)
 
                 async def validate_single(source, client):
-                    nonlocal processed, valid_sources, failed_sources
-
-                    # 检查是否已取消（直接读取 session 状态，不加锁）
-                    if session.status == "cancelled":
-                        return
-
                     url = ValidatorService.clean_source_url(source.get('bookSourceUrl', ''))
                     name = source.get('bookSourceName', '')
+                    request_timeout = controller.current_timeout
+                    started = time.perf_counter()
+                    is_valid, reason = await ValidatorService.validate_source_access(
+                        url,
+                        request_timeout,
+                        client=client,
+                        max_retries=options.max_retries,
+                    )
+                    duration = time.perf_counter() - started
+                    return source, url, name, is_valid, reason, duration
 
-                    async with semaphore:
-                        # 再次检查取消状态（直接读取，不加锁）
+                async with ValidatorService.create_validation_client(options.timeout) as client:
+                    while pending_sources or running_tasks:
                         if session.status == "cancelled":
-                            return
+                            for task in running_tasks:
+                                task.cancel()
+                            break
 
-                        is_valid, reason = await ValidatorService.validate_source_access(url, session.timeout, client=client)
+                        if session.status == "paused":
+                            await asyncio.sleep(0.3)
+                            continue
 
-                        async with lock:
-                            # 检查取消状态
-                            if session.status == "cancelled":
-                                return
+                        while (
+                            pending_sources
+                            and len(running_tasks) < controller.current_concurrency
+                            and session.status == "running"
+                        ):
+                            task = asyncio.create_task(validate_single(pending_sources.pop(0), client))
+                            running_tasks.add(task)
 
+                        validation_tasks = list(running_tasks)
+                        session.validation_tasks = validation_tasks
+                        if not running_tasks:
+                            await asyncio.sleep(0.1)
+                            continue
+
+                        done, running_tasks = await asyncio.wait(
+                            running_tasks,
+                            timeout=0.3,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+
+                        for task in done:
+                            if task.cancelled():
+                                continue
+                            exc = task.exception()
+                            if exc:
+                                logger.warning("单个书源校验异常: session_id=%s error=%s", session_id, exc)
+                                continue
+
+                            source, url, name, is_valid, reason, duration = task.result()
                             processed += 1
                             if is_valid:
                                 valid_sources.append(source)
                             else:
-                                if reason not in failed_sources:
-                                    failed_sources[reason] = []
-                                failed_sources[reason].append({
-                                    'url': url,
-                                    'name': name,
-                                    'reason': reason
-                                })
+                                append_failed_source(failed_sources, reason, source, url, name)
 
-                            # 直接更新 session 进度（不加锁，Python GIL 保证原子性）
+                            controller.record(duration, is_valid, reason)
+                            snapshot = controller.snapshot()
+                            session.current_concurrency = snapshot["currentConcurrency"]
+                            session.current_timeout = snapshot["currentTimeout"]
                             total_failed = sum(len(v) for v in failed_sources.values())
                             session.processed = processed
                             session.valid = len(valid_sources)
                             session.invalid = total_failed
                             session.current_url = url
                             session.current_name = name
-
-                # 并发执行，并复用 HTTP 客户端连接池，减少服务器上的 DNS/TCP/TLS 开销。
-                async with ValidatorService.create_validation_client(session.timeout) as client:
-                    validation_tasks = [asyncio.create_task(validate_single(s, client)) for s in session.sources]
-                    # 保存任务到 session，用于取消（直接访问，不加锁）
-                    session.validation_tasks = validation_tasks
-                    await asyncio.gather(*validation_tasks, return_exceptions=True)
+                            session.valid_sources = valid_sources
+                            session.failed_sources = failed_sources
 
                 # 只有未取消时才完成会话
                 if session.status != "cancelled":
@@ -617,15 +720,7 @@ async def get_validation_progress(session_id: str):
                     valid_sources = session.valid_sources
                     failed_sources = session.failed_sources
 
-                    # 构建失败分组
-                    failed_groups = []
-                    for reason, sources_list in failed_sources.items():
-                        failed_groups.append({
-                            'reason': reason,
-                            'count': len(sources_list),
-                            'sources': sources_list
-                        })
-                    failed_groups.sort(key=lambda x: x['count'], reverse=True)
+                    failed_groups = build_failed_groups(failed_sources)
 
                     # 设置分组
                     ValidatorService.set_source_group(valid_sources, len(valid_sources))
@@ -647,13 +742,42 @@ async def get_validation_progress(session_id: str):
                         "dedupCount": session.dedup_count if session.dedup_count else session.total,
                         "duplicates": session.duplicates,
                         "formatInvalid": session.format_invalid,
-                        "totalOriginal": session.total_original if session.total_original else session.total
+                        "totalOriginal": session.total_original if session.total_original else session.total,
+                        "strategy": {
+                            "mode": session.validation_mode,
+                            "smartEnabled": session.smart_enabled,
+                            "currentConcurrency": session.current_concurrency,
+                            "currentTimeout": session.current_timeout,
+                        },
                     }
                     logger.info(f"SSE完成消息: validCount={len(valid_sources)}, invalidCount={sum(len(v) for v in failed_sources.values())}, validSources数量={len(valid_sources)}, failedGroups数量={len(failed_groups)}")
                     yield f"data: {json.dumps(result_data, ensure_ascii=False)}\n\n"
 
                 elif session.status == "cancelled":
-                    yield f"data: {json.dumps({'status': 'cancelled'})}\n\n"
+                    valid_sources = session.valid_sources
+                    failed_sources = session.failed_sources
+                    failed_groups = build_failed_groups(failed_sources)
+                    ValidatorService.set_source_group(valid_sources, len(valid_sources))
+                    result_data = {
+                        "status": "cancelled",
+                        "processed": session.processed,
+                        "total": session.total,
+                        "valid": len(valid_sources),
+                        "invalid": sum(len(v) for v in failed_sources.values()),
+                        "validCount": len(valid_sources),
+                        "invalidCount": sum(len(v) for v in failed_sources.values()),
+                        "validSources": valid_sources,
+                        "failedGroups": failed_groups,
+                        "failedCategories": categorize_failed_sources(failed_groups),
+                        "partial": True,
+                        "fileStats": session.file_stats,
+                        "urlStats": session.url_stats,
+                        "dedupCount": session.dedup_count if session.dedup_count else session.total,
+                        "duplicates": session.duplicates,
+                        "formatInvalid": session.format_invalid,
+                        "totalOriginal": session.total_original if session.total_original else session.total,
+                    }
+                    yield f"data: {json.dumps(result_data, ensure_ascii=False)}\n\n"
 
                 elif session.status == "error":
                     yield f"data: {json.dumps({'status': 'error', 'error': '校验过程发生错误'})}\n\n"
@@ -679,7 +803,13 @@ async def get_validation_progress(session_id: str):
                 "currentName": session.current_name,
                 "elapsed": round(elapsed, 1),
                 "estimatedRemaining": round(estimated_remaining, 1),
-                "status": "running"  # 明确标记为运行中
+                "status": session.status,
+                "strategy": {
+                    "mode": session.validation_mode,
+                    "smartEnabled": session.smart_enabled,
+                    "currentConcurrency": session.current_concurrency,
+                    "currentTimeout": session.current_timeout,
+                },
             }
 
             yield f"data: {json.dumps(progress_data)}\n\n"
@@ -705,6 +835,22 @@ async def cancel_validation(session_id: str = Form(...)):
     return {"code": 200, "message": "已取消"}
 
 
+@router.post("/validate/pause")
+async def pause_validation(session_id: str = Form(...)):
+    """暂停校验。"""
+    await session_manager.pause_session(session_id)
+    logger.info("校验暂停请求: session_id=%s", session_id)
+    return {"code": 200, "message": "已暂停"}
+
+
+@router.post("/validate/resume")
+async def resume_validation(session_id: str = Form(...)):
+    """恢复校验。"""
+    await session_manager.resume_session(session_id)
+    logger.info("校验恢复请求: session_id=%s", session_id)
+    return {"code": 200, "message": "已恢复"}
+
+
 # ===================== 批量处理接口 =====================
 
 @router.post("/parse/batch-files/start")
@@ -712,6 +858,8 @@ async def start_batch_files_validation(
     files: List[UploadFile] = File(...),
     concurrency: int = Form(default=16),
     timeout: int = Form(default=30),
+    validation_mode: str = Form(default="custom"),
+    smart_enabled: bool = Form(default=True),
     filter_types: str = Form(default="")
 ):
     """
@@ -722,7 +870,7 @@ async def start_batch_files_validation(
     logger.info(f"开始批量解析(SSE) {len(files)} 个文件")
 
     try:
-        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+        options = validate_runtime_options(concurrency, timeout, validation_mode, smart_enabled)
     except ValueError as exc:
         return {"code": 400, "message": str(exc)}
 
@@ -769,7 +917,14 @@ async def start_batch_files_validation(
     format_valid, format_invalid = ValidatorService.format_validate(deduped)
 
     # 创建会话
-    session_id = await session_manager.create_session(format_valid, concurrency, timeout)
+    session_id = await session_manager.create_session(
+        format_valid,
+        options.concurrency,
+        options.timeout,
+        options.mode,
+        options.smart_enabled,
+        options.max_retries,
+    )
     logger.info(
         "批量文件SSE会话创建: session_id=%s files=%s total=%s dedup=%s "
         "duplicates=%s format_invalid=%s deep_total=%s concurrency=%s timeout=%s",
@@ -780,8 +935,8 @@ async def start_batch_files_validation(
         duplicates,
         format_invalid,
         len(format_valid),
-        concurrency,
-        timeout,
+        options.concurrency,
+        options.timeout,
     )
 
     # 保存文件统计到会话（直接访问 _sessions，避免死锁）
@@ -803,6 +958,8 @@ async def start_batch_files_validation(
         "formatInvalid": format_invalid,
         "deepTotal": len(format_valid),
         "fileStats": file_stats,
+        "validationMode": options.mode,
+        "smartEnabled": options.smart_enabled,
         "message": "会话创建成功"
     }
 
@@ -817,12 +974,14 @@ async def start_batch_urls_validation(request: dict):
     urls = request.get('urls', [])
     concurrency = request.get('concurrency', 16)
     timeout = request.get('timeout', 30)
+    validation_mode = request.get('validation_mode', 'custom')
+    smart_enabled = request.get('smart_enabled', True)
     filter_types = request.get('filter_types', '')
 
     logger.info(f"开始批量解析(SSE) {len(urls)} 个URL")
 
     try:
-        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+        options = validate_runtime_options(concurrency, timeout, validation_mode, smart_enabled)
     except ValueError as exc:
         return {"code": 400, "message": str(exc)}
 
@@ -881,7 +1040,14 @@ async def start_batch_urls_validation(request: dict):
     format_valid, format_invalid = ValidatorService.format_validate(deduped)
 
     # 创建会话
-    session_id = await session_manager.create_session(format_valid, concurrency, timeout)
+    session_id = await session_manager.create_session(
+        format_valid,
+        options.concurrency,
+        options.timeout,
+        options.mode,
+        options.smart_enabled,
+        options.max_retries,
+    )
     logger.info(
         "批量URL SSE会话创建: session_id=%s urls=%s total=%s dedup=%s "
         "duplicates=%s format_invalid=%s deep_total=%s concurrency=%s timeout=%s",
@@ -892,8 +1058,8 @@ async def start_batch_urls_validation(request: dict):
         duplicates,
         format_invalid,
         len(format_valid),
-        concurrency,
-        timeout,
+        options.concurrency,
+        options.timeout,
     )
 
     # 保存统计到会话（直接访问 _sessions，避免死锁）
@@ -915,6 +1081,8 @@ async def start_batch_urls_validation(request: dict):
         "formatInvalid": format_invalid,
         "deepTotal": len(format_valid),
         "urlStats": url_stats,
+        "validationMode": options.mode,
+        "smartEnabled": options.smart_enabled,
         "message": "会话创建成功"
     }
 
@@ -925,6 +1093,8 @@ async def parse_batch_files(
     mode: str = Form(default="dedup"),
     concurrency: int = Form(default=16),
     timeout: int = Form(default=30),
+    validation_mode: str = Form(default="custom"),
+    smart_enabled: bool = Form(default=True),
     filter_types: str = Form(default="")
 ):
     """
@@ -935,7 +1105,7 @@ async def parse_batch_files(
     logger.info(f"开始批量解析 {len(files)} 个文件, 模式: {mode}")
 
     try:
-        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+        options = validate_runtime_options(concurrency, timeout, validation_mode, smart_enabled)
     except ValueError as exc:
         return ParseResponse(code=400, message=str(exc))
 
@@ -982,7 +1152,7 @@ async def parse_batch_files(
     filter_list = [f.strip() for f in filter_types.split(',') if f.strip()] if filter_types else []
 
     # 处理合并后的书源
-    result = await process_sources({"sources": all_sources}, mode, concurrency, timeout, filter_list)
+    result = await process_sources({"sources": all_sources}, mode, options, filter_list)
 
     # 添加文件统计信息
     result.fileStats = file_stats
@@ -1001,12 +1171,14 @@ async def parse_batch_urls(request: dict):
     mode = request.get('mode', 'dedup')
     concurrency = request.get('concurrency', 16)
     timeout = request.get('timeout', 30)
+    validation_mode = request.get('validation_mode', 'custom')
+    smart_enabled = request.get('smart_enabled', True)
     filter_types = request.get('filter_types', '')
 
     logger.info(f"开始批量解析 {len(urls)} 个URL, 模式: {mode}")
 
     try:
-        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+        options = validate_runtime_options(concurrency, timeout, validation_mode, smart_enabled)
     except ValueError as exc:
         return ParseResponse(code=400, message=str(exc))
 
@@ -1063,7 +1235,7 @@ async def parse_batch_urls(request: dict):
     filter_list = filter_types.split(',') if filter_types else []
 
     # 处理合并后的书源
-    result = await process_sources({"sources": all_sources}, mode, concurrency, timeout, filter_list)
+    result = await process_sources({"sources": all_sources}, mode, options, filter_list)
 
     # 添加URL统计信息
     result.urlStats = url_stats
@@ -1082,7 +1254,9 @@ async def start_search_validation(
     keyword: str = Form(default="玄幻"),
     validate_type: str = Form(default="search"),  # 'search' 或 'explore'
     concurrency: int = Form(default=16),
-    timeout: int = Form(default=30)
+    timeout: int = Form(default=30),
+    validation_mode: str = Form(default="custom"),
+    smart_enabled: bool = Form(default=True),
 ):
     """
     开始搜索校验（SSE模式）
@@ -1098,7 +1272,7 @@ async def start_search_validation(
     logger.info(f"[搜索校验] 文件: {file.filename}, 关键词: {keyword}, 类型: {validate_type}")
 
     try:
-        concurrency, timeout = validate_runtime_options(concurrency, timeout)
+        options = validate_runtime_options(concurrency, timeout, validation_mode, smart_enabled)
     except ValueError as exc:
         return {"code": 400, "message": str(exc)}
 
@@ -1136,7 +1310,14 @@ async def start_search_validation(
     logger.info(f"[搜索校验] 步骤5: 提取书源完成, 数量: {len(sources)}")
 
     # 6. 创建会话
-    session_id = await session_manager.create_session(sources, concurrency, timeout)
+    session_id = await session_manager.create_session(
+        sources,
+        options.concurrency,
+        options.timeout,
+        options.mode,
+        options.smart_enabled,
+        options.max_retries,
+    )
     logger.info(
         "搜索校验会话创建: session_id=%s total=%s keyword=%s type=%s "
         "concurrency=%s timeout=%s",
@@ -1144,8 +1325,8 @@ async def start_search_validation(
         len(sources),
         keyword,
         validate_type,
-        concurrency,
-        timeout,
+        options.concurrency,
+        options.timeout,
     )
     logger.info(f"[搜索校验] 步骤6: 会话创建成功, sessionId: {session_id}")
 
@@ -1165,7 +1346,67 @@ async def start_search_validation(
         "total": len(sources),
         "keyword": keyword,
         "validateType": validate_type,
+        "validationMode": options.mode,
+        "smartEnabled": options.smart_enabled,
         "message": "会话创建成功"
+    }
+
+
+@router.post("/validate/search/start-data")
+async def start_search_validation_from_data(request: dict):
+    """开始搜索校验（SSE模式）- 从失败书源数据重试。"""
+    sources = request.get("sources", [])
+    keyword = request.get("keyword", "玄幻")
+    validate_type = request.get("validate_type", "search")
+    concurrency = request.get("concurrency", 16)
+    timeout = request.get("timeout", 30)
+    validation_mode = request.get("validation_mode", "custom")
+    smart_enabled = request.get("smart_enabled", True)
+
+    try:
+        options = validate_runtime_options(concurrency, timeout, validation_mode, smart_enabled)
+    except ValueError as exc:
+        return {"code": 400, "message": str(exc)}
+
+    if not sources:
+        return {"code": 400, "message": "书源数据为空"}
+
+    session_id = await session_manager.create_session(
+        sources,
+        options.concurrency,
+        options.timeout,
+        options.mode,
+        options.smart_enabled,
+        options.max_retries,
+    )
+
+    async with session_manager._lock:
+        session = session_manager._sessions.get(session_id)
+        if session:
+            session.search_keyword = keyword
+            session.validate_type = validate_type
+            session.total_original = len(sources)
+
+    logger.info(
+        "搜索校验数据会话创建: session_id=%s total=%s keyword=%s type=%s "
+        "concurrency=%s timeout=%s",
+        session_id,
+        len(sources),
+        keyword,
+        validate_type,
+        options.concurrency,
+        options.timeout,
+    )
+
+    return {
+        "code": 200,
+        "sessionId": session_id,
+        "total": len(sources),
+        "keyword": keyword,
+        "validateType": validate_type,
+        "validationMode": options.mode,
+        "smartEnabled": options.smart_enabled,
+        "message": "会话创建成功",
     }
 
 
@@ -1201,6 +1442,13 @@ async def get_search_validation_progress(session_id: str):
                 processed = 0
                 lock = asyncio.Lock()
                 semaphore = asyncio.Semaphore(session.concurrency)
+                options = ValidationOptions(
+                    concurrency=session.concurrency,
+                    timeout=session.timeout,
+                    mode=session.validation_mode,
+                    smart_enabled=session.smart_enabled,
+                    max_retries=session.max_retries,
+                )
 
                 keyword = getattr(session, 'search_keyword', '玄幻')
                 validate_type = getattr(session, 'validate_type', 'search')
@@ -1213,11 +1461,15 @@ async def get_search_validation_progress(session_id: str):
                     # 检查是否已取消（直接读取 session 状态，不加锁）
                     if session.status == "cancelled":
                         return
+                    while session.status == "paused":
+                        await asyncio.sleep(0.3)
 
                     async with semaphore:
                         # 再次检查取消状态（直接读取，不加锁）
                         if session.status == "cancelled":
                             return
+                        while session.status == "paused":
+                            await asyncio.sleep(0.3)
 
                         # 组合模式：分别校验搜索和发现
                         if validate_type == 'both':
@@ -1242,6 +1494,8 @@ async def get_search_validation_progress(session_id: str):
                                     session.invalid = total_failed
                                     session.current_url = url
                                     session.current_name = name
+                                    session.valid_sources = valid_sources
+                                    session.failed_sources = failed_sources
                                 return
 
                             search_valid = False
@@ -1252,13 +1506,18 @@ async def get_search_validation_progress(session_id: str):
                             # 校验搜索
                             if has_search:
                                 search_valid, search_reason, _ = await SearchValidatorService.validate_search(
-                                    source, keyword, session.timeout
+                                    source,
+                                    keyword,
+                                    session.current_timeout,
+                                    max_retries=options.max_retries,
                                 )
 
                             # 校验发现
                             if has_explore:
                                 explore_valid, explore_reason, _ = await SearchValidatorService.validate_explore(
-                                    source, session.timeout
+                                    source,
+                                    session.current_timeout,
+                                    max_retries=options.max_retries,
                                 )
 
                             async with lock:
@@ -1299,6 +1558,8 @@ async def get_search_validation_progress(session_id: str):
                                 session.invalid = total_failed
                                 session.current_url = url
                                 session.current_name = name
+                                session.valid_sources = valid_sources
+                                session.failed_sources = failed_sources
 
                         # 单一模式：仅搜索或仅发现
                         elif validate_type == 'search':
@@ -1320,10 +1581,15 @@ async def get_search_validation_progress(session_id: str):
                                     session.invalid = total_failed
                                     session.current_url = url
                                     session.current_name = name
+                                    session.valid_sources = valid_sources
+                                    session.failed_sources = failed_sources
                                 return
 
                             is_valid, reason, results = await SearchValidatorService.validate_search(
-                                source, keyword, session.timeout
+                                source,
+                                keyword,
+                                session.current_timeout,
+                                max_retries=options.max_retries,
                             )
 
                             async with lock:
@@ -1346,6 +1612,8 @@ async def get_search_validation_progress(session_id: str):
                                 session.invalid = total_failed
                                 session.current_url = url
                                 session.current_name = name
+                                session.valid_sources = valid_sources
+                                session.failed_sources = failed_sources
 
                         else:  # explore
                             # 先检查是否有发现规则
@@ -1366,10 +1634,14 @@ async def get_search_validation_progress(session_id: str):
                                     session.invalid = total_failed
                                     session.current_url = url
                                     session.current_name = name
+                                    session.valid_sources = valid_sources
+                                    session.failed_sources = failed_sources
                                 return
 
                             is_valid, reason, results = await SearchValidatorService.validate_explore(
-                                source, session.timeout
+                                source,
+                                session.current_timeout,
+                                max_retries=options.max_retries,
                             )
 
                             async with lock:
@@ -1392,6 +1664,8 @@ async def get_search_validation_progress(session_id: str):
                                 session.invalid = total_failed
                                 session.current_url = url
                                 session.current_name = name
+                                session.valid_sources = valid_sources
+                                session.failed_sources = failed_sources
 
                 # 并发执行
                 logger.info(f"开始并发校验 {len(session.sources)} 个书源")
@@ -1439,15 +1713,7 @@ async def get_search_validation_progress(session_id: str):
                     valid_sources = session.valid_sources
                     failed_sources = session.failed_sources
 
-                    # 构建失败分组
-                    failed_groups = []
-                    for reason, sources_list in failed_sources.items():
-                        failed_groups.append({
-                            'reason': reason,
-                            'count': len(sources_list),
-                            'sources': sources_list
-                        })
-                    failed_groups.sort(key=lambda x: x['count'], reverse=True)
+                    failed_groups = build_failed_groups(failed_sources)
 
                     result_data = {
                         "status": "completed",
@@ -1461,12 +1727,35 @@ async def get_search_validation_progress(session_id: str):
                         "failedGroups": failed_groups,
                         "failedCategories": categorize_failed_sources(failed_groups),
                         # 规则类型统计
-                        "ruleTypeStats": calculate_rule_type_stats(valid_sources, failed_sources)
+                        "ruleTypeStats": calculate_rule_type_stats(valid_sources, failed_sources),
+                        "strategy": {
+                            "mode": session.validation_mode,
+                            "smartEnabled": session.smart_enabled,
+                            "currentConcurrency": session.current_concurrency,
+                            "currentTimeout": session.current_timeout,
+                        },
                     }
                     yield f"data: {json.dumps(result_data, ensure_ascii=False)}\n\n"
 
                 elif session.status == "cancelled":
-                    yield f"data: {json.dumps({'status': 'cancelled'})}\n\n"
+                    valid_sources = session.valid_sources
+                    failed_sources = session.failed_sources
+                    failed_groups = build_failed_groups(failed_sources)
+                    result_data = {
+                        "status": "cancelled",
+                        "processed": session.processed,
+                        "total": session.total,
+                        "valid": len(valid_sources),
+                        "invalid": sum(len(v) for v in failed_sources.values()),
+                        "validCount": len(valid_sources),
+                        "invalidCount": sum(len(v) for v in failed_sources.values()),
+                        "validSources": valid_sources,
+                        "failedGroups": failed_groups,
+                        "failedCategories": categorize_failed_sources(failed_groups),
+                        "ruleTypeStats": calculate_rule_type_stats(valid_sources, failed_sources),
+                        "partial": True,
+                    }
+                    yield f"data: {json.dumps(result_data, ensure_ascii=False)}\n\n"
 
                 elif session.status == "error":
                     yield f"data: {json.dumps({'status': 'error', 'error': '校验过程发生错误'})}\n\n"
@@ -1492,7 +1781,13 @@ async def get_search_validation_progress(session_id: str):
                 "currentName": session.current_name,
                 "elapsed": round(elapsed, 1),
                 "estimatedRemaining": round(estimated_remaining, 1),
-                "status": "running"
+                "status": session.status,
+                "strategy": {
+                    "mode": session.validation_mode,
+                    "smartEnabled": session.smart_enabled,
+                    "currentConcurrency": session.current_concurrency,
+                    "currentTimeout": session.current_timeout,
+                },
             }
 
             yield f"data: {json.dumps(progress_data)}\n\n"

@@ -28,12 +28,14 @@ export async function submitFeedback(payload) {
  * @param {number} timeout - 深度校验超时时间 (15/30/45/60秒)
  * @param {string} filterTypes - 过滤类型（逗号分隔）
  */
-export async function parseFile(file, mode = 'dedup', concurrency = 16, timeout = 30, filterTypes = '') {
+export async function parseFile(file, mode = 'dedup', concurrency = 16, timeout = 30, filterTypes = '', validationMode = 'custom') {
   const formData = new FormData()
   formData.append('file', file)
   formData.append('mode', mode)
   formData.append('concurrency', concurrency)
   formData.append('timeout', timeout)
+  formData.append('validation_mode', validationMode)
+  formData.append('smart_enabled', true)
   formData.append('filter_types', filterTypes)
 
   const response = await axios.post(`${API_BASE}/parse/file`, formData, {
@@ -52,8 +54,16 @@ export async function parseFile(file, mode = 'dedup', concurrency = 16, timeout 
  * @param {number} timeout - 深度校验超时时间 (15/30/45/60秒)
  * @param {string} filterTypes - 过滤类型（逗号分隔）
  */
-export async function parseUrl(url, mode = 'dedup', concurrency = 16, timeout = 30, filterTypes = '') {
-  const response = await axios.post(`${API_BASE}/parse/url`, { url, mode, concurrency, timeout, filter_types: filterTypes })
+export async function parseUrl(url, mode = 'dedup', concurrency = 16, timeout = 30, filterTypes = '', validationMode = 'custom') {
+  const response = await axios.post(`${API_BASE}/parse/url`, {
+    url,
+    mode,
+    concurrency,
+    timeout,
+    validation_mode: validationMode,
+    smart_enabled: true,
+    filter_types: filterTypes
+  })
   return response.data
 }
 
@@ -78,11 +88,13 @@ export async function createBookSourceExport(sources, filename) {
  * @param {string} filterTypes - 过滤类型（逗号分隔）
  * @returns {Promise<{code: number, sessionId: string, total: number}>}
  */
-export async function startValidation(file, concurrency = 16, timeout = 30, filterTypes = '') {
+export async function startValidation(file, concurrency = 16, timeout = 30, filterTypes = '', validationMode = 'custom') {
   const formData = new FormData()
   formData.append('file', file)
   formData.append('concurrency', concurrency)
   formData.append('timeout', timeout)
+  formData.append('validation_mode', validationMode)
+  formData.append('smart_enabled', true)
   formData.append('filter_types', filterTypes)
 
   const response = await axios.post(`${API_BASE}/validate/start`, formData, {
@@ -100,11 +112,13 @@ export async function startValidation(file, concurrency = 16, timeout = 30, filt
  * @param {number} timeout - 超时时间
  * @returns {Promise<{code: number, sessionId: string}>}
  */
-export async function startValidationFromData(sources, concurrency = 16, timeout = 30) {
+export async function startValidationFromData(sources, concurrency = 16, timeout = 30, validationMode = 'custom') {
   const response = await axios.post(`${API_BASE}/validate/start-data`, {
     sources,
     concurrency,
-    timeout
+    timeout,
+    validation_mode: validationMode,
+    smart_enabled: true
   })
   return response.data
 }
@@ -142,6 +156,28 @@ export async function cancelValidation(sessionId) {
   return response.data
 }
 
+export async function pauseValidation(sessionId) {
+  const formData = new FormData()
+  formData.append('session_id', sessionId)
+  const response = await axios.post(`${API_BASE}/validate/pause`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data'
+    }
+  })
+  return response.data
+}
+
+export async function resumeValidation(sessionId) {
+  const formData = new FormData()
+  formData.append('session_id', sessionId)
+  const response = await axios.post(`${API_BASE}/validate/resume`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data'
+    }
+  })
+  return response.data
+}
+
 /**
  * 批量解析多个文件
  * @param {File[]} files - JSON文件数组
@@ -150,7 +186,7 @@ export async function cancelValidation(sessionId) {
  * @param {number} timeout - 深度校验超时时间
  * @param {string} filterTypes - 过滤类型（逗号分隔）
  */
-export async function parseBatchFiles(files, mode = 'dedup', concurrency = 16, timeout = 30, filterTypes = '') {
+export async function parseBatchFiles(files, mode = 'dedup', concurrency = 16, timeout = 30, filterTypes = '', validationMode = 'custom') {
   const formData = new FormData()
   files.forEach(file => {
     formData.append('files', file)
@@ -158,6 +194,8 @@ export async function parseBatchFiles(files, mode = 'dedup', concurrency = 16, t
   formData.append('mode', mode)
   formData.append('concurrency', concurrency)
   formData.append('timeout', timeout)
+  formData.append('validation_mode', validationMode)
+  formData.append('smart_enabled', true)
   formData.append('filter_types', filterTypes)
 
   const response = await axios.post(`${API_BASE}/parse/batch-files`, formData, {
@@ -176,12 +214,14 @@ export async function parseBatchFiles(files, mode = 'dedup', concurrency = 16, t
  * @param {number} timeout - 深度校验超时时间
  * @param {string} filterTypes - 过滤类型（逗号分隔）
  */
-export async function parseBatchUrls(urls, mode = 'dedup', concurrency = 16, timeout = 30, filterTypes = '') {
+export async function parseBatchUrls(urls, mode = 'dedup', concurrency = 16, timeout = 30, filterTypes = '', validationMode = 'custom') {
   const response = await axios.post(`${API_BASE}/parse/batch-urls`, {
     urls,
     mode,
     concurrency,
     timeout,
+    validation_mode: validationMode,
+    smart_enabled: true,
     filter_types: filterTypes
   })
   return response.data
@@ -195,13 +235,15 @@ export async function parseBatchUrls(urls, mode = 'dedup', concurrency = 16, tim
  * @param {string} filterTypes - 过滤类型（逗号分隔）
  * @returns {Promise<{code: number, sessionId: string, fileStats: Array}>}
  */
-export async function startBatchFilesValidation(files, concurrency = 16, timeout = 30, filterTypes = '') {
+export async function startBatchFilesValidation(files, concurrency = 16, timeout = 30, filterTypes = '', validationMode = 'custom') {
   const formData = new FormData()
   files.forEach(file => {
     formData.append('files', file)
   })
   formData.append('concurrency', concurrency)
   formData.append('timeout', timeout)
+  formData.append('validation_mode', validationMode)
+  formData.append('smart_enabled', true)
   formData.append('filter_types', filterTypes)
 
   const response = await axios.post(`${API_BASE}/parse/batch-files/start`, formData, {
@@ -220,11 +262,13 @@ export async function startBatchFilesValidation(files, concurrency = 16, timeout
  * @param {string} filterTypes - 过滤类型（逗号分隔）
  * @returns {Promise<{code: number, sessionId: string, urlStats: Array}>}
  */
-export async function startBatchUrlsValidation(urls, concurrency = 16, timeout = 30, filterTypes = '') {
+export async function startBatchUrlsValidation(urls, concurrency = 16, timeout = 30, filterTypes = '', validationMode = 'custom') {
   const response = await axios.post(`${API_BASE}/parse/batch-urls/start`, {
     urls,
     concurrency,
     timeout,
+    validation_mode: validationMode,
+    smart_enabled: true,
     filter_types: filterTypes
   })
   return response.data
@@ -239,18 +283,33 @@ export async function startBatchUrlsValidation(urls, concurrency = 16, timeout =
  * @param {number} timeout - 超时时间
  * @returns {Promise<{code: number, sessionId: string, total: number}>}
  */
-export async function startSearchValidation(file, keyword = '玄幻', validateType = 'search', concurrency = 16, timeout = 30) {
+export async function startSearchValidation(file, keyword = '玄幻', validateType = 'search', concurrency = 16, timeout = 30, validationMode = 'custom') {
   const formData = new FormData()
   formData.append('file', file)
   formData.append('keyword', keyword)
   formData.append('validate_type', validateType)
   formData.append('concurrency', concurrency)
   formData.append('timeout', timeout)
+  formData.append('validation_mode', validationMode)
+  formData.append('smart_enabled', true)
 
   const response = await axios.post(`${API_BASE}/validate/search/start`, formData, {
     headers: {
       'Content-Type': 'multipart/form-data'
     }
+  })
+  return response.data
+}
+
+export async function startSearchValidationFromData(sources, keyword = '玄幻', validateType = 'search', concurrency = 16, timeout = 30, validationMode = 'custom') {
+  const response = await axios.post(`${API_BASE}/validate/search/start-data`, {
+    sources,
+    keyword,
+    validate_type: validateType,
+    concurrency,
+    timeout,
+    validation_mode: validationMode,
+    smart_enabled: true
   })
   return response.data
 }

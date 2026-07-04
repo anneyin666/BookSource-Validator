@@ -54,8 +54,14 @@
 
     <!-- 参数设置 -->
     <div class="settings-row">
-      <ConcurrencySelector v-model="concurrency" />
-      <TimeoutSelector v-model="timeout" />
+      <ValidationPresetSelector
+        v-model="validationMode"
+        @apply="applyPreset"
+      />
+      <div v-if="validationMode === 'custom'" class="custom-strategy-fields">
+        <ConcurrencySelector v-model="concurrency" />
+        <TimeoutSelector v-model="timeout" />
+      </div>
     </div>
 
     <!-- 开始校验按钮 -->
@@ -74,6 +80,7 @@
 import { ref, watch } from 'vue'
 import ConcurrencySelector from './ConcurrencySelector.vue'
 import TimeoutSelector from './TimeoutSelector.vue'
+import ValidationPresetSelector from './ValidationPresetSelector.vue'
 
 const props = defineProps({
   loading: Boolean
@@ -90,6 +97,13 @@ const keyword = ref('玄幻')
 const customKeyword = ref('')
 const concurrency = ref(16)
 const timeout = ref(30)
+const validationMode = ref('balanced')
+
+function applyPreset(preset) {
+  if (preset.value === 'custom') return
+  concurrency.value = preset.concurrency
+  timeout.value = preset.timeout
+}
 
 // 监听自定义关键词输入
 function handleCustomInput() {
@@ -111,7 +125,8 @@ function startValidation() {
     validateType: validateType.value,
     keyword: keyword.value,
     concurrency: concurrency.value,
-    timeout: timeout.value
+    timeout: timeout.value,
+    validationMode: validationMode.value
   })
   console.log('start-validation 事件已 emit')
 }
@@ -121,7 +136,8 @@ defineExpose({
   validateType,
   keyword,
   concurrency,
-  timeout
+  timeout,
+  validationMode
 })
 </script>
 
@@ -252,6 +268,13 @@ defineExpose({
   flex-wrap: wrap;
 }
 
+.custom-strategy-fields {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+}
+
 .start-btn {
   width: 100%;
   padding: 12px;
@@ -304,6 +327,20 @@ defineExpose({
   .settings-row {
     flex-direction: column;
     gap: 12px;
+  }
+
+  .custom-strategy-fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .custom-strategy-fields :deep(.concurrency-selector),
+  .custom-strategy-fields :deep(.timeout-selector) {
+    justify-content: center;
+    padding: 10px 8px;
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
   }
 }
 </style>

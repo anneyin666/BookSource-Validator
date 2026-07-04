@@ -8,6 +8,7 @@ from urllib.parse import quote
 import httpx
 
 from app.services.js_processor import JSRuleProcessor
+from app.services.validation_strategy import get_retry_delay
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +304,8 @@ class SearchValidatorService:
     async def validate_search(
         source: dict,
         keyword: str,
-        timeout: int = 30
+        timeout: int = 30,
+        max_retries: int = 2,
     ) -> Tuple[bool, str, Optional[List[dict]]]:
         """
         验证书源的搜索功能
@@ -366,11 +368,9 @@ class SearchValidatorService:
         if not url or not url.startswith(('http://', 'https://')):
             return False, "URL格式错误", None
 
-        # 最多重试2次
-        max_retries = 2
         last_error = ""
 
-        for attempt in range(max_retries):
+        for attempt in range(max_retries + 1):
             try:
                 # 第二次重试时强制使用 HTTP/1.1
                 use_http1 = attempt > 0
@@ -412,28 +412,28 @@ class SearchValidatorService:
 
             except httpx.TimeoutException:
                 last_error = "超时"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except httpx.ConnectError:
                 last_error = "连接失败"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except httpx.ConnectTimeout:
                 last_error = "连接超时"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except httpx.ReadTimeout:
                 last_error = "读取超时"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except httpx.WriteTimeout:
                 last_error = "写入超时"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except httpx.RemoteProtocolError as e:
                 # HTTP 协议错误（如 Server disconnected）- 重试
@@ -442,8 +442,8 @@ class SearchValidatorService:
                     last_error = "服务器断开"
                 else:
                     last_error = "协议错误"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except httpx.HTTPStatusError as e:
                 return False, f"HTTP {e.response.status_code}", None
@@ -456,8 +456,8 @@ class SearchValidatorService:
                     last_error = "网络错误"
                 else:
                     last_error = error_msg
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except Exception as e:
                 error_msg = str(e)[:50]
@@ -470,7 +470,8 @@ class SearchValidatorService:
     @staticmethod
     async def validate_explore(
         source: dict,
-        timeout: int = 30
+        timeout: int = 30,
+        max_retries: int = 2,
     ) -> Tuple[bool, str, Optional[List[dict]]]:
         """
         验证书源的发现功能
@@ -534,11 +535,9 @@ class SearchValidatorService:
             else:
                 url = "https://" + url
 
-        # 最多重试2次
-        max_retries = 2
         last_error = ""
 
-        for attempt in range(max_retries):
+        for attempt in range(max_retries + 1):
             try:
                 # 第二次重试时强制使用 HTTP/1.1
                 use_http1 = attempt > 0
@@ -575,28 +574,28 @@ class SearchValidatorService:
 
             except httpx.TimeoutException:
                 last_error = "超时"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except httpx.ConnectError:
                 last_error = "连接失败"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except httpx.ConnectTimeout:
                 last_error = "连接超时"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except httpx.ReadTimeout:
                 last_error = "读取超时"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except httpx.WriteTimeout:
                 last_error = "写入超时"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except httpx.RemoteProtocolError as e:
                 error_msg = str(e)[:50]
@@ -604,8 +603,8 @@ class SearchValidatorService:
                     last_error = "服务器断开"
                 else:
                     last_error = "协议错误"
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except httpx.HTTPStatusError as e:
                 return False, f"HTTP {e.response.status_code}", None
@@ -617,8 +616,8 @@ class SearchValidatorService:
                     last_error = "网络错误"
                 else:
                     last_error = error_msg
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
+                if attempt < max_retries:
+                    await asyncio.sleep(get_retry_delay(attempt))
                     continue
             except Exception as e:
                 error_msg = str(e)[:50]
@@ -635,6 +634,7 @@ class SearchValidatorService:
         validate_type: str = 'search',
         timeout: int = 30,
         concurrency: int = 16,
+        max_retries: int = 2,
         progress_callback=None
     ) -> Tuple[List[dict], Dict[str, List[dict]]]:
         """
@@ -677,11 +677,11 @@ class SearchValidatorService:
 
                 if validate_type == 'search':
                     is_valid, reason, results = await SearchValidatorService.validate_search(
-                        source, keyword, timeout
+                        source, keyword, timeout, max_retries=max_retries
                     )
                 else:
                     is_valid, reason, results = await SearchValidatorService.validate_explore(
-                        source, timeout
+                        source, timeout, max_retries=max_retries
                     )
 
                 async with lock:

@@ -16,6 +16,9 @@
       <span class="stat-item valid">✅ 有效: {{ valid }}</span>
       <span class="stat-item invalid">❌ 失败: {{ invalid }}</span>
       <span class="stat-item time">⏱️ 耗时: {{ formatTime(elapsedTime) }}</span>
+      <span class="stat-item strategy" v-if="strategy">
+        🧠 {{ strategyLabel }}
+      </span>
       <span class="stat-item estimate" v-if="estimatedRemaining > 0">
         📊 预估剩余: {{ formatTime(estimatedRemaining) }}
       </span>
@@ -27,9 +30,17 @@
       <span class="current-url" v-if="currentUrl">{{ truncateUrl(currentUrl) }}</span>
     </div>
 
-    <button class="cancel-btn" @click="$emit('cancel')">
-      ⏹️ 取消校验
-    </button>
+    <div class="progress-actions">
+      <button v-if="status === 'paused'" class="resume-btn" @click="$emit('resume')">
+        ▶️ 继续校验
+      </button>
+      <button v-else class="pause-btn" @click="$emit('pause')">
+        ⏸️ 暂停校验
+      </button>
+      <button class="cancel-btn" @click="$emit('cancel')">
+        ⏹️ 取消并保留结果
+      </button>
+    </div>
   </div>
 </template>
 
@@ -68,14 +79,34 @@ const props = defineProps({
   estimatedRemaining: {
     type: Number,
     default: 0
+  },
+  status: {
+    type: String,
+    default: 'running'
+  },
+  strategy: {
+    type: Object,
+    default: null
   }
 })
 
-defineEmits(['cancel'])
+defineEmits(['cancel', 'pause', 'resume'])
 
 const percentage = computed(() => {
   if (props.total === 0) return 0
   return Math.round((props.processed / props.total) * 100)
+})
+
+const strategyLabel = computed(() => {
+  if (!props.strategy) return ''
+  const modeMap = {
+    fast: '快速',
+    balanced: '均衡',
+    stable: '稳定',
+    custom: '自定义'
+  }
+  const mode = modeMap[props.strategy.mode] || props.strategy.mode || '策略'
+  return `${mode} · ${props.strategy.currentConcurrency || '-'}并发 · ${props.strategy.currentTimeout || '-'}秒`
 })
 
 function truncateUrl(url) {
@@ -163,6 +194,10 @@ function formatTime(seconds) {
   color: #c4b5fd;
 }
 
+.stat-item.strategy {
+  color: #bbf7d0;
+}
+
 .progress-current {
   font-size: 12px;
   opacity: 0.9;
@@ -194,8 +229,15 @@ function formatTime(seconds) {
   word-break: break-all;
 }
 
-.cancel-btn {
-  width: 100%;
+.progress-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: 10px;
+}
+
+.cancel-btn,
+.pause-btn,
+.resume-btn {
   padding: 12px;
   background: rgba(255, 255, 255, 0.2);
   color: white;
@@ -207,7 +249,9 @@ function formatTime(seconds) {
   min-height: 44px;
 }
 
-.cancel-btn:hover {
+.cancel-btn:hover,
+.pause-btn:hover,
+.resume-btn:hover {
   background: rgba(255, 255, 255, 0.3);
   border-color: rgba(255, 255, 255, 0.5);
 }
@@ -253,6 +297,10 @@ function formatTime(seconds) {
 
   .current-url {
     font-size: 11px;
+  }
+
+  .progress-actions {
+    grid-template-columns: 1fr;
   }
 }
 </style>
