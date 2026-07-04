@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # 阅读书源去重校验工具
   booksource-validator:
@@ -10,11 +8,16 @@ services:
     container_name: booksource-validator
     ports:
       - "8000:8000"
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/logs:/app/logs
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
+      - DEBUG=false
+      - APP_LOG_DIR=/app/logs
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
