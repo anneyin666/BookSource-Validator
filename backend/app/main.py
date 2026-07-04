@@ -1,13 +1,18 @@
 # FastAPI应用入口
-import os
+import time
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from app.config import settings
+from app.logging_config import configure_logging, get_logger
+
+LOG_FILE_PATH = configure_logging()
+logger = get_logger(__name__)
+
 from app.api import router
 
 # 创建应用
@@ -16,6 +21,53 @@ app = FastAPI(
     description="开源阅读 App 书源文件处理工具 - 支持去重、格式校验、深度校验",
     version="1.0.0"
 )
+
+
+@app.on_event("startup")
+async def log_startup_event():
+    """Record service startup information."""
+    logger.info(
+        "服务启动: app=%s debug=%s log_file=%s",
+        settings.APP_NAME,
+        settings.DEBUG,
+        LOG_FILE_PATH,
+    )
+
+
+@app.on_event("shutdown")
+async def log_shutdown_event():
+    """Record service shutdown information."""
+    logger.info("服务关闭")
+
+
+@app.middleware("http")
+async def log_request_errors(request: Request, call_next):
+    """Log slow requests, client errors and unhandled server errors."""
+    start_time = time.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration = time.perf_counter() - start_time
+        logger.exception(
+            "请求异常: method=%s path=%s duration=%.2fs client=%s",
+            request.method,
+            request.url.path,
+            duration,
+            request.client.host if request.client else "",
+        )
+        raise
+
+    duration = time.perf_counter() - start_time
+    if response.status_code >= 400 or duration >= 10:
+        logger.warning(
+            "请求完成: method=%s path=%s status=%s duration=%.2fs client=%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration,
+            request.client.host if request.client else "",
+        )
+    return response
 
 # CORS配置
 app.add_middleware(

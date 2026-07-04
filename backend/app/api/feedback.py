@@ -1,4 +1,6 @@
+"""User feedback API."""
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -7,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 FEEDBACK_FILE = Path(__file__).parent.parent.parent / "data" / "feedback.jsonl"
 
@@ -40,5 +43,13 @@ async def submit_feedback(payload: FeedbackPayload, request: Request):
     FEEDBACK_FILE.parent.mkdir(parents=True, exist_ok=True)
     with FEEDBACK_FILE.open("a", encoding="utf-8") as file:
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    logger.info(
+        "反馈已保存: client=%s message_length=%s has_contact=%s file=%s",
+        record["client_host"],
+        len(message),
+        bool(record["contact"]),
+        FEEDBACK_FILE,
+    )
 
     return {"code": 200, "message": "反馈已保存"}

@@ -27,9 +27,8 @@ from app.config import settings
 
 router = APIRouter()
 
-# 配置日志
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+SLOW_VALIDATION_SECONDS = 5 * 60
 
 
 def calculate_rule_type_stats(valid_sources: List[dict], failed_sources: dict) -> dict:
@@ -315,6 +314,7 @@ async def process_sources(data, mode: str = "dedup", concurrency: int = 16, time
     """
     if filter_types is None:
         filter_types = []
+    started_at = time.perf_counter()
 
     # 步骤1：提取书源数组
     sources = ParserService.extract_sources(data)
@@ -352,7 +352,22 @@ async def process_sources(data, mode: str = "dedup", concurrency: int = 16, time
     # 步骤6：设置分组
     valid_count = len(final_valid)
     ValidatorService.set_source_group(final_valid, valid_count)
-    logger.info(f"最终有效书源: {valid_count}")
+    elapsed = time.perf_counter() - started_at
+    log_method = logger.warning if elapsed >= SLOW_VALIDATION_SECONDS else logger.info
+    log_method(
+        "校验批次完成: mode=%s total=%s dedup=%s duplicates=%s format_invalid=%s "
+        "deep_invalid=%s valid=%s concurrency=%s timeout=%s duration=%.2fs",
+        mode,
+        total,
+        len(deduped),
+        duplicates,
+        format_invalid,
+        deep_invalid,
+        valid_count,
+        concurrency,
+        timeout,
+        elapsed,
+    )
 
     return SourceData(
         total=total,
@@ -422,6 +437,18 @@ async def start_validation(
 
     # 7. 创建会话
     session_id = await session_manager.create_session(format_valid, concurrency, timeout)
+    logger.info(
+        "SSE校验会话创建: session_id=%s total=%s dedup=%s duplicates=%s "
+        "format_invalid=%s deep_total=%s concurrency=%s timeout=%s",
+        session_id,
+        len(sources),
+        len(deduped),
+        duplicates,
+        format_invalid,
+        len(format_valid),
+        concurrency,
+        timeout,
+    )
 
     return {
         "code": 200,
@@ -458,6 +485,13 @@ async def start_validation_from_data(request: dict):
 
     # 创建会话
     session_id = await session_manager.create_session(sources, concurrency, timeout)
+    logger.info(
+        "SSE数据校验会话创建: session_id=%s deep_total=%s concurrency=%s timeout=%s",
+        session_id,
+        len(sources),
+        concurrency,
+        timeout,
+    )
 
     return {
         "code": 200,
@@ -488,6 +522,7 @@ async def get_validation_progress(session_id: str):
         # 启动校验任务
         async def run_validation():
             nonlocal validation_tasks
+            started_at = time.perf_counter()
             try:
                 valid_sources = []
                 failed_sources = {}
@@ -548,11 +583,26 @@ async def get_validation_progress(session_id: str):
                 # 只有未取消时才完成会话
                 if session.status != "cancelled":
                     await session_manager.complete_session(session_id, valid_sources, failed_sources)
+                    elapsed = time.perf_counter() - started_at
+                    invalid_count = sum(len(v) for v in failed_sources.values())
+                    log_method = logger.warning if elapsed >= SLOW_VALIDATION_SECONDS else logger.info
+                    log_method(
+                        "SSE校验完成: session_id=%s total=%s valid=%s invalid=%s "
+                        "concurrency=%s timeout=%s duration=%.2fs",
+                        session_id,
+                        total,
+                        len(valid_sources),
+                        invalid_count,
+                        session.concurrency,
+                        session.timeout,
+                        elapsed,
+                    )
 
             except asyncio.CancelledError:
-                logger.info(f"校验任务被取消: {session_id}")
-            except Exception as e:
-                logger.error(f"校验异常: {e}")
+                elapsed = time.perf_counter() - started_at
+                logger.info("SSE校验任务被取消: session_id=%s duration=%.2fs", session_id, elapsed)
+            except Exception:
+                logger.exception("SSE校验异常: session_id=%s", session_id)
                 session.status = "error"
 
         # 后台运行校验
@@ -651,6 +701,7 @@ async def get_validation_progress(session_id: str):
 async def cancel_validation(session_id: str = Form(...)):
     """取消校验"""
     await session_manager.cancel_session(session_id)
+    logger.info("校验取消请求: session_id=%s", session_id)
     return {"code": 200, "message": "已取消"}
 
 
@@ -719,6 +770,19 @@ async def start_batch_files_validation(
 
     # 创建会话
     session_id = await session_manager.create_session(format_valid, concurrency, timeout)
+    logger.info(
+        "批量文件SSE会话创建: session_id=%s files=%s total=%s dedup=%s "
+        "duplicates=%s format_invalid=%s deep_total=%s concurrency=%s timeout=%s",
+        session_id,
+        len(files),
+        len(all_sources),
+        len(deduped),
+        duplicates,
+        format_invalid,
+        len(format_valid),
+        concurrency,
+        timeout,
+    )
 
     # 保存文件统计到会话（直接访问 _sessions，避免死锁）
     async with session_manager._lock:
@@ -818,6 +882,19 @@ async def start_batch_urls_validation(request: dict):
 
     # 创建会话
     session_id = await session_manager.create_session(format_valid, concurrency, timeout)
+    logger.info(
+        "批量URL SSE会话创建: session_id=%s urls=%s total=%s dedup=%s "
+        "duplicates=%s format_invalid=%s deep_total=%s concurrency=%s timeout=%s",
+        session_id,
+        len(urls),
+        len(all_sources),
+        len(deduped),
+        duplicates,
+        format_invalid,
+        len(format_valid),
+        concurrency,
+        timeout,
+    )
 
     # 保存统计到会话（直接访问 _sessions，避免死锁）
     async with session_manager._lock:
@@ -1060,6 +1137,16 @@ async def start_search_validation(
 
     # 6. 创建会话
     session_id = await session_manager.create_session(sources, concurrency, timeout)
+    logger.info(
+        "搜索校验会话创建: session_id=%s total=%s keyword=%s type=%s "
+        "concurrency=%s timeout=%s",
+        session_id,
+        len(sources),
+        keyword,
+        validate_type,
+        concurrency,
+        timeout,
+    )
     logger.info(f"[搜索校验] 步骤6: 会话创建成功, sessionId: {session_id}")
 
     # 保存搜索校验参数（直接访问 _sessions，避免死锁）
@@ -1105,6 +1192,7 @@ async def get_search_validation_progress(session_id: str):
 
         # 启动校验任务
         async def run_validation():
+            started_at = time.perf_counter()
             try:
                 logger.info(f"启动校验任务: validate_type={getattr(session, 'validate_type', 'search')}, keyword={getattr(session, 'search_keyword', '玄幻')}")
                 valid_sources = []
@@ -1312,16 +1400,32 @@ async def get_search_validation_progress(session_id: str):
                 session.validation_tasks = validation_tasks
                 await asyncio.gather(*validation_tasks, return_exceptions=True)
 
-                logger.info(f"校验完成: valid={len(valid_sources)}, invalid={sum(len(v) for v in failed_sources.values())}")
                 # 只有未取消时才完成会话
                 if session.status != "cancelled":
                     await session_manager.complete_session(session_id, valid_sources, failed_sources)
+                    elapsed = time.perf_counter() - started_at
+                    invalid_count = sum(len(v) for v in failed_sources.values())
+                    log_method = logger.warning if elapsed >= SLOW_VALIDATION_SECONDS else logger.info
+                    log_method(
+                        "搜索校验完成: session_id=%s total=%s valid=%s invalid=%s "
+                        "type=%s keyword=%s concurrency=%s timeout=%s duration=%.2fs",
+                        session_id,
+                        total,
+                        len(valid_sources),
+                        invalid_count,
+                        validate_type,
+                        keyword,
+                        session.concurrency,
+                        session.timeout,
+                        elapsed,
+                    )
 
             except asyncio.CancelledError:
-                logger.info(f"搜索校验任务被取消: {session_id}")
+                elapsed = time.perf_counter() - started_at
+                logger.info("搜索校验任务被取消: session_id=%s duration=%.2fs", session_id, elapsed)
 
-            except Exception as e:
-                logger.error(f"搜索校验异常: {e}")
+            except Exception:
+                logger.exception("搜索校验异常: session_id=%s", session_id)
                 session.status = "error"
 
         # 后台运行校验
