@@ -4,7 +4,6 @@
 
 # Python
 __pycache__
-**/__pycache__
 *.py[cod]
 *$py.class
 *.so
@@ -12,17 +11,13 @@ __pycache__
 venv
 env
 .venv
-**/.venv
 *.egg-info
 .eggs
 dist
-**/dist
 build
-**/build
 
 # Node.js
 node_modules
-**/node_modules
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
