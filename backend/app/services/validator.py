@@ -64,7 +64,8 @@ class ValidatorService:
     @staticmethod
     async def validate_source_access(
         url: str,
-        timeout: int = None
+        timeout: int = None,
+        client: Optional[httpx.AsyncClient] = None
     ) -> Tuple[bool, str]:
         """
         深度校验单个书源
@@ -97,17 +98,19 @@ class ValidatorService:
 
             # HEAD 失败后尝试 GET 请求（部分网站不支持HEAD）
             try:
-                response = await client.get(
+                async with client.stream(
+                    "GET",
                     url,
                     headers=ValidatorService.REQUEST_HEADERS,
                     follow_redirects=True
-                )
+                ) as response:
+                    # 只需要状态码判断可访问性，不下载正文，避免小带宽服务器被页面内容拖慢。
+                    if response.status_code == 403:
+                        return True, "403-ignored"
+                    if 200 <= response.status_code < 400:
+                        return True, ""
+                    return False, f"HTTP {response.status_code}"
                 # 403 可能是 Cloudflare 防护，视为有效
-                if response.status_code == 403:
-                    return True, "403-ignored"
-                if 200 <= response.status_code < 400:
-                    return True, ""
-                return False, f"HTTP {response.status_code}"
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 403:
                     return True, "403-ignored"
@@ -127,16 +130,11 @@ class ValidatorService:
 
             return False, "未知错误"
 
-        # 重试机制
-        for attempt in range(settings.MAX_RETRIES + 1):
-            try:
-                async with httpx.AsyncClient(
-                    timeout=timeout,
-                    follow_redirects=True,
-                    max_redirects=settings.MAX_REDIRECTS,
-                    verify=False  # 忽略SSL证书验证
-                ) as client:
-                    is_valid, reason = await do_request(client)
+        async def validate_with_client(request_client: httpx.AsyncClient) -> Tuple[bool, str]:
+            # 重试机制
+            for attempt in range(settings.MAX_RETRIES + 1):
+                try:
+                    is_valid, reason = await do_request(request_client)
                     if is_valid:
                         return True, ""
 
@@ -153,21 +151,71 @@ class ValidatorService:
 
                     return False, reason
 
-            except httpx.TimeoutException:
-                if attempt == settings.MAX_RETRIES:
-                    return False, "超时"
-                await asyncio.sleep(settings.RETRY_DELAY)
-            except httpx.ConnectError:
-                if attempt == settings.MAX_RETRIES:
-                    return False, "连接失败"
-                await asyncio.sleep(settings.RETRY_DELAY)
-            except Exception as e:
-                logger.debug(f"校验异常 {url}: {type(e).__name__}: {str(e)}")
-                if attempt == settings.MAX_RETRIES:
-                    return False, type(e).__name__
-                await asyncio.sleep(settings.RETRY_DELAY)
+                except httpx.TimeoutException:
+                    if attempt == settings.MAX_RETRIES:
+                        return False, "超时"
+                    await asyncio.sleep(settings.RETRY_DELAY)
+                except httpx.ConnectError:
+                    if attempt == settings.MAX_RETRIES:
+                        return False, "连接失败"
+                    await asyncio.sleep(settings.RETRY_DELAY)
+                except Exception as e:
+                    logger.debug(f"校验异常 {url}: {type(e).__name__}: {str(e)}")
+                    if attempt == settings.MAX_RETRIES:
+                        return False, type(e).__name__
+                    await asyncio.sleep(settings.RETRY_DELAY)
 
-        return False, "重试耗尽"
+            return False, "重试耗尽"
+
+        if client is not None:
+            return await validate_with_client(client)
+
+        # 兼容单次调用场景；批量校验应传入共享 client 以复用连接池。
+        try:
+            limits = httpx.Limits(max_connections=100, max_keepalive_connections=50)
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=True,
+                max_redirects=settings.MAX_REDIRECTS,
+                verify=False,
+                limits=limits
+            ) as request_client:
+                return await validate_with_client(request_client)
+        except httpx.TimeoutException:
+            return False, "超时"
+        except httpx.ConnectError:
+            return False, "连接失败"
+        except Exception as e:
+            logger.debug(f"校验异常 {url}: {type(e).__name__}: {str(e)}")
+            return False, type(e).__name__
+
+    @staticmethod
+    def create_validation_client(timeout: int) -> httpx.AsyncClient:
+        """Create a shared HTTP client for a validation batch."""
+        limits = httpx.Limits(max_connections=100, max_keepalive_connections=50)
+        return httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            max_redirects=settings.MAX_REDIRECTS,
+            verify=False,
+            limits=limits
+        )
+
+    @staticmethod
+    def clean_source_url(url: str) -> str:
+        """Remove trailing Chinese notes that may be appended after a source URL."""
+        import re
+        chinese_match = re.search(r'[\u4e00-\u9fff]', url)
+        if not chinese_match:
+            return url
+
+        chinese_index = chinese_match.start()
+        slash_index = url.find('/', 8)
+        if slash_index != -1 and chinese_index > slash_index:
+            return url[:chinese_index]
+        if chinese_index > 8:
+            return url[:chinese_index]
+        return url
 
     @staticmethod
     async def deep_validate(
@@ -204,51 +252,38 @@ class ValidatorService:
 
         semaphore = asyncio.Semaphore(concurrency)
 
-        async def validate_single(source: dict) -> Tuple[dict, bool, str]:
-            """校验单个书源"""
-            nonlocal processed, valid, failed_sources
+        # 并发执行所有校验任务，并复用同一个 HTTP 客户端连接池。
+        async with ValidatorService.create_validation_client(timeout) as client:
+            async def validate_single_with_client(source: dict) -> Tuple[dict, bool, str]:
+                nonlocal processed, valid, failed_sources
 
-            url = source.get('bookSourceUrl', '')
-            name = source.get('bookSourceName', '')
+                url = ValidatorService.clean_source_url(source.get('bookSourceUrl', ''))
+                name = source.get('bookSourceName', '')
 
-            # 清理 URL 中的中文字符（如作者信息）
-            import re
-            chinese_match = re.search(r'[\u4e00-\u9fff]', url)
-            if chinese_match:
-                chinese_index = chinese_match.start()
-                slash_index = url.find('/', 8)  # 跳过 http:// 或 https://
-                if slash_index != -1 and chinese_index > slash_index:
-                    url = url[:chinese_index]
-                elif chinese_index > 8:
-                    url = url[:chinese_index]
+                async with semaphore:
+                    is_valid, reason = await ValidatorService.validate_source_access(url, timeout, client=client)
 
-            async with semaphore:
-                is_valid, reason = await ValidatorService.validate_source_access(url, timeout)
+                    async with lock:
+                        processed += 1
+                        if is_valid:
+                            valid.append(source)
+                        else:
+                            if reason not in failed_sources:
+                                failed_sources[reason] = []
+                            failed_sources[reason].append({
+                                'url': url,
+                                'name': name,
+                                'reason': reason
+                            })
+                            logger.debug(f"无效书源 [{processed}/{total}]: {url} - {reason}")
 
-                async with lock:
-                    processed += 1
-                    if is_valid:
-                        valid.append(source)
-                    else:
-                        # 记录失败书源
-                        if reason not in failed_sources:
-                            failed_sources[reason] = []
-                        failed_sources[reason].append({
-                            'url': url,
-                            'name': name,
-                            'reason': reason
-                        })
-                        logger.debug(f"无效书源 [{processed}/{total}]: {url} - {reason}")
+                        if progress_callback:
+                            progress_callback(processed, total, url, len(valid), len(failed_sources))
 
-                    # 进度回调
-                    if progress_callback:
-                        progress_callback(processed, total, url, len(valid), len(failed_sources))
+                    return source, is_valid, reason
 
-                return source, is_valid, reason
-
-        # 并发执行所有校验任务
-        tasks = [validate_single(source) for source in sources]
-        await asyncio.gather(*tasks)
+            tasks = [validate_single_with_client(source) for source in sources]
+            await asyncio.gather(*tasks)
 
         # 构建失败分组列表
         failed_groups = []

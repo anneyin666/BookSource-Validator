@@ -496,14 +496,14 @@ async def get_validation_progress(session_id: str):
                 lock = asyncio.Lock()
                 semaphore = asyncio.Semaphore(session.concurrency)
 
-                async def validate_single(source):
+                async def validate_single(source, client):
                     nonlocal processed, valid_sources, failed_sources
 
                     # 检查是否已取消（直接读取 session 状态，不加锁）
                     if session.status == "cancelled":
                         return
 
-                    url = source.get('bookSourceUrl', '')
+                    url = ValidatorService.clean_source_url(source.get('bookSourceUrl', ''))
                     name = source.get('bookSourceName', '')
 
                     async with semaphore:
@@ -511,7 +511,7 @@ async def get_validation_progress(session_id: str):
                         if session.status == "cancelled":
                             return
 
-                        is_valid, reason = await ValidatorService.validate_source_access(url, session.timeout)
+                        is_valid, reason = await ValidatorService.validate_source_access(url, session.timeout, client=client)
 
                         async with lock:
                             # 检查取消状态
@@ -538,11 +538,12 @@ async def get_validation_progress(session_id: str):
                             session.current_url = url
                             session.current_name = name
 
-                # 并发执行
-                validation_tasks = [asyncio.create_task(validate_single(s)) for s in session.sources]
-                # 保存任务到 session，用于取消（直接访问，不加锁）
-                session.validation_tasks = validation_tasks
-                await asyncio.gather(*validation_tasks, return_exceptions=True)
+                # 并发执行，并复用 HTTP 客户端连接池，减少服务器上的 DNS/TCP/TLS 开销。
+                async with ValidatorService.create_validation_client(session.timeout) as client:
+                    validation_tasks = [asyncio.create_task(validate_single(s, client)) for s in session.sources]
+                    # 保存任务到 session，用于取消（直接访问，不加锁）
+                    session.validation_tasks = validation_tasks
+                    await asyncio.gather(*validation_tasks, return_exceptions=True)
 
                 # 只有未取消时才完成会话
                 if session.status != "cancelled":
