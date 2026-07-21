@@ -20,6 +20,18 @@ NETWORK_RETRY_REASONS = {
     "网络错误",
     "SSL错误",
     "重试耗尽",
+    "ConnectError",
+    "ConnectTimeout",
+    "ReadError",
+    "ReadTimeout",
+    "WriteError",
+    "WriteTimeout",
+    "PoolTimeout",
+    "RemoteProtocolError",
+    "ProtocolError",
+    "NetworkError",
+    "ProxyError",
+    "SSL",
 }
 
 TIMEOUT_REASONS = {
@@ -27,6 +39,10 @@ TIMEOUT_REASONS = {
     "连接超时",
     "读取超时",
     "写入超时",
+    "ConnectTimeout",
+    "ReadTimeout",
+    "WriteTimeout",
+    "PoolTimeout",
 }
 
 PRESET_OPTIONS = {
@@ -43,6 +59,7 @@ DEFAULT_MODE = "balanced"
 SAMPLE_WINDOW_SIZE = 32
 EVALUATION_INTERVAL = 16
 MIN_CONCURRENCY_RATIO = 0.5
+ADAPTIVE_MIN_CONCURRENCY = 4
 MAX_TIMEOUT_INCREASE = 10
 
 
@@ -168,9 +185,14 @@ class AdaptiveValidationController:
         self.options = options
         self.max_concurrency = options.concurrency
         self.current_concurrency = options.concurrency
-        self.min_concurrency = max(
-            MIN_CONCURRENCY,
-            math.ceil(self.max_concurrency * MIN_CONCURRENCY_RATIO),
+        self.min_concurrency = min(
+            self.max_concurrency,
+            max(
+                ADAPTIVE_MIN_CONCURRENCY,
+                math.ceil(
+                    self.max_concurrency * MIN_CONCURRENCY_RATIO
+                ),
+            ),
         )
         self.base_timeout = options.timeout
         self.current_timeout = options.timeout

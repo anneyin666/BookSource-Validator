@@ -634,15 +634,118 @@ async def get_validation_progress(session_id: str):
                     duration = time.perf_counter() - started
                     return work_item, url, name, is_valid, reason, duration
 
+                def process_completed_tasks(done_tasks):
+                    nonlocal processed
+                    for task in done_tasks:
+                        if task.cancelled():
+                            continue
+                        exc = task.exception()
+                        if exc:
+                            logger.warning(
+                                "单个书源校验异常: session_id=%s error=%s",
+                                session_id,
+                                exc,
+                            )
+                            continue
+
+                        (
+                            work_item,
+                            url,
+                            name,
+                            is_valid,
+                            reason,
+                            duration,
+                        ) = task.result()
+                        if work_item.attempt == 0:
+                            adjustment = controller.record(
+                                duration,
+                                is_valid,
+                                reason,
+                            )
+                            if adjustment is not None:
+                                logger.info(
+                                    "智能策略评估: session_id=%s phase=%s "
+                                    "samples=%s network_error_rate=%.3f "
+                                    "timeout_rate=%.3f p75=%.2f "
+                                    "concurrency=%s->%s timeout=%s->%s "
+                                    "reason=%s",
+                                    session_id,
+                                    session.validation_phase,
+                                    adjustment.sample_count,
+                                    adjustment.network_error_rate,
+                                    adjustment.timeout_rate,
+                                    adjustment.p75_duration,
+                                    adjustment.previous_concurrency,
+                                    adjustment.current_concurrency,
+                                    adjustment.previous_timeout,
+                                    adjustment.current_timeout,
+                                    adjustment.reason,
+                                )
+
+                        scheduled_retry = False
+                        if not is_valid and is_retryable_reason(reason):
+                            if work_item.attempt == 0:
+                                session.primary_network_failures += 1
+                            scheduled_retry = work_queue.schedule_retry(
+                                work_item,
+                                reason,
+                                now=time.monotonic(),
+                                delay=get_retry_delay(
+                                    work_item.attempt,
+                                    settings.RETRY_DELAY,
+                                ),
+                            )
+
+                        if not scheduled_retry:
+                            processed += 1
+                            if is_valid:
+                                valid_sources.append(work_item.source)
+                            else:
+                                append_failed_source(
+                                    failed_sources,
+                                    reason,
+                                    work_item.source,
+                                    url,
+                                    name,
+                                )
+
+                        snapshot = controller.snapshot()
+                        session.current_concurrency = snapshot[
+                            "currentConcurrency"
+                        ]
+                        session.current_timeout = snapshot["currentTimeout"]
+                        total_failed = sum(
+                            len(items) for items in failed_sources.values()
+                        )
+                        session.processed = processed
+                        session.valid = len(valid_sources)
+                        session.invalid = total_failed
+                        session.current_url = url
+                        session.current_name = name
+                        session.valid_sources = valid_sources
+                        session.failed_sources = failed_sources
+
                 async with ValidatorService.create_validation_client(options.timeout) as client:
                     while work_queue.has_work or running_tasks:
                         if session.status == "cancelled":
-                            for task in running_tasks:
+                            completed_tasks = {
+                                task for task in running_tasks if task.done()
+                            }
+                            for task in running_tasks - completed_tasks:
                                 task.cancel()
+                            process_completed_tasks(completed_tasks)
                             break
 
                         if session.status == "paused":
-                            await asyncio.sleep(0.3)
+                            if not running_tasks:
+                                await asyncio.sleep(0.3)
+                                continue
+                            done, running_tasks = await asyncio.wait(
+                                running_tasks,
+                                timeout=0.3,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            process_completed_tasks(done)
                             continue
 
                         work_queue.advance_phase(
@@ -692,87 +795,7 @@ async def get_validation_progress(session_id: str):
                             timeout=0.3,
                             return_when=asyncio.FIRST_COMPLETED,
                         )
-
-                        for task in done:
-                            if task.cancelled():
-                                continue
-                            exc = task.exception()
-                            if exc:
-                                logger.warning("单个书源校验异常: session_id=%s error=%s", session_id, exc)
-                                continue
-
-                            (
-                                work_item,
-                                url,
-                                name,
-                                is_valid,
-                                reason,
-                                duration,
-                            ) = task.result()
-                            if work_item.attempt == 0:
-                                adjustment = controller.record(
-                                    duration,
-                                    is_valid,
-                                    reason,
-                                )
-                                if adjustment is not None:
-                                    logger.info(
-                                        "智能策略评估: session_id=%s phase=%s "
-                                        "samples=%s network_error_rate=%.3f "
-                                        "timeout_rate=%.3f p75=%.2f "
-                                        "concurrency=%s->%s timeout=%s->%s "
-                                        "reason=%s",
-                                        session_id,
-                                        session.validation_phase,
-                                        adjustment.sample_count,
-                                        adjustment.network_error_rate,
-                                        adjustment.timeout_rate,
-                                        adjustment.p75_duration,
-                                        adjustment.previous_concurrency,
-                                        adjustment.current_concurrency,
-                                        adjustment.previous_timeout,
-                                        adjustment.current_timeout,
-                                        adjustment.reason,
-                                    )
-
-                            scheduled_retry = False
-                            if not is_valid and is_retryable_reason(reason):
-                                if work_item.attempt == 0:
-                                    session.primary_network_failures += 1
-                                scheduled_retry = work_queue.schedule_retry(
-                                    work_item,
-                                    reason,
-                                    now=time.monotonic(),
-                                    delay=get_retry_delay(
-                                        work_item.attempt,
-                                        settings.RETRY_DELAY,
-                                    ),
-                                )
-
-                            if not scheduled_retry:
-                                processed += 1
-                                if is_valid:
-                                    valid_sources.append(work_item.source)
-                                else:
-                                    append_failed_source(
-                                        failed_sources,
-                                        reason,
-                                        work_item.source,
-                                        url,
-                                        name,
-                                    )
-
-                            snapshot = controller.snapshot()
-                            session.current_concurrency = snapshot["currentConcurrency"]
-                            session.current_timeout = snapshot["currentTimeout"]
-                            total_failed = sum(len(v) for v in failed_sources.values())
-                            session.processed = processed
-                            session.valid = len(valid_sources)
-                            session.invalid = total_failed
-                            session.current_url = url
-                            session.current_name = name
-                            session.valid_sources = valid_sources
-                            session.failed_sources = failed_sources
+                        process_completed_tasks(done)
 
                 # 只有未取消时才完成会话
                 if session.status != "cancelled":

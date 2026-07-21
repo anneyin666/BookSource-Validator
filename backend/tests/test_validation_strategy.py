@@ -3,6 +3,7 @@
 from app.services.validation_strategy import (
     AdaptiveValidationController,
     ValidationOptions,
+    is_retryable_reason,
 )
 
 
@@ -163,3 +164,39 @@ def test_disabled_smart_mode_never_changes_runtime_options():
     assert adjustments == []
     assert controller.current_concurrency == 16
     assert controller.current_timeout == 30
+
+
+def test_custom_mode_never_drops_below_global_floor():
+    """Small custom values must still preserve four active slots."""
+    controller = AdaptiveValidationController(
+        ValidationOptions(
+            concurrency=6,
+            timeout=30,
+            mode="custom",
+            smart_enabled=True,
+            max_retries=2,
+        )
+    )
+
+    record_window(
+        controller,
+        count=64,
+        duration=29,
+        is_valid=False,
+        reason="超时",
+    )
+
+    assert controller.current_concurrency == 4
+
+
+def test_httpx_protocol_and_timeout_names_are_retryable():
+    """httpx exception class names must enter the network retry path."""
+    retryable_reasons = [
+        "RemoteProtocolError",
+        "ReadTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+        "ConnectError",
+    ]
+
+    assert all(is_retryable_reason(reason) for reason in retryable_reasons)
