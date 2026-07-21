@@ -105,8 +105,14 @@ const strategyLabel = computed(() => {
     stable: '稳定',
     custom: '自定义'
   }
+  const phaseMap = {
+    primary: '首轮',
+    retry: '网络重试'
+  }
   const mode = modeMap[props.strategy.mode] || props.strategy.mode || '策略'
-  return `${mode} · ${props.strategy.currentConcurrency || '-'}并发 · ${props.strategy.currentTimeout || '-'}秒`
+  const phase = phaseMap[props.strategy.phase] || ''
+  const phaseText = phase ? ` · ${phase}` : ''
+  return `${mode}${phaseText} · ${props.strategy.currentConcurrency || '-'}并发 · ${props.strategy.currentTimeout || '-'}秒`
 })
 
 function truncateUrl(url) {

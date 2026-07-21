@@ -843,6 +843,7 @@ async def get_validation_progress(session_id: str):
                         "strategy": {
                             "mode": session.validation_mode,
                             "smartEnabled": session.smart_enabled,
+                            "phase": session.validation_phase,
                             "currentConcurrency": session.current_concurrency,
                             "currentTimeout": session.current_timeout,
                         },
@@ -873,6 +874,13 @@ async def get_validation_progress(session_id: str):
                         "duplicates": session.duplicates,
                         "formatInvalid": session.format_invalid,
                         "totalOriginal": session.total_original if session.total_original else session.total,
+                        "strategy": {
+                            "mode": session.validation_mode,
+                            "smartEnabled": session.smart_enabled,
+                            "phase": session.validation_phase,
+                            "currentConcurrency": session.current_concurrency,
+                            "currentTimeout": session.current_timeout,
+                        },
                     }
                     yield f"data: {json.dumps(result_data, ensure_ascii=False)}\n\n"
 
@@ -904,6 +912,7 @@ async def get_validation_progress(session_id: str):
                 "strategy": {
                     "mode": session.validation_mode,
                     "smartEnabled": session.smart_enabled,
+                    "phase": session.validation_phase,
                     "currentConcurrency": session.current_concurrency,
                     "currentTimeout": session.current_timeout,
                 },
