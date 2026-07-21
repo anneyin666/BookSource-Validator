@@ -174,7 +174,10 @@ class AdaptiveValidationController:
         )
         self.base_timeout = options.timeout
         self.current_timeout = options.timeout
-        self.max_timeout = min(MAX_TIMEOUT, options.timeout + MAX_TIMEOUT_INCREASE)
+        self.max_timeout = min(
+            MAX_TIMEOUT,
+            options.timeout + MAX_TIMEOUT_INCREASE,
+        )
         self.samples: Deque[ValidationSample] = deque(
             maxlen=SAMPLE_WINDOW_SIZE
         )

@@ -6,7 +6,10 @@ from app.services.validation_strategy import (
 )
 
 
-def build_controller(*, smart_enabled: bool = True) -> AdaptiveValidationController:
+def build_controller(
+    *,
+    smart_enabled: bool = True,
+) -> AdaptiveValidationController:
     """Create a balanced controller for deterministic tests."""
     return AdaptiveValidationController(
         ValidationOptions(
