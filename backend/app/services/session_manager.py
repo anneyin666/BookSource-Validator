@@ -27,6 +27,9 @@ class ValidationSession:
     max_retries: int = 2
     current_concurrency: int = 16
     current_timeout: int = 30
+    validation_phase: str = "primary"
+    primary_network_failures: int = 0
+    retry_attempts: int = 0
     # 最终结果
     valid_sources: List[dict] = field(default_factory=list)
     failed_sources: Dict[str, List[dict]] = field(default_factory=dict)

@@ -23,9 +23,12 @@ from app.services.export_store import export_store
 from app.services.session_manager import session_manager
 from app.services.search_validator import categorize_failed_sources
 from app.services.url_security import UrlSecurityService
+from app.services.validation_scheduler import AdaptiveWorkQueue
 from app.services.validation_strategy import (
     AdaptiveValidationController,
     ValidationOptions,
+    get_retry_delay,
+    is_retryable_reason,
     normalize_validation_options,
 )
 from app.config import settings
@@ -599,7 +602,6 @@ async def get_validation_progress(session_id: str):
                 failed_sources = {}
                 total = len(session.sources)
                 processed = 0
-                pending_sources = list(session.sources)
                 running_tasks = set()
                 options = ValidationOptions(
                     concurrency=session.concurrency,
@@ -609,23 +611,31 @@ async def get_validation_progress(session_id: str):
                     max_retries=session.max_retries,
                 )
                 controller = AdaptiveValidationController(options)
+                work_queue = AdaptiveWorkQueue(
+                    session.sources,
+                    options.max_retries,
+                )
 
-                async def validate_single(source, client):
+                async def validate_single(
+                    work_item,
+                    client,
+                    request_timeout,
+                ):
+                    source = work_item.source
                     url = ValidatorService.clean_source_url(source.get('bookSourceUrl', ''))
                     name = source.get('bookSourceName', '')
-                    request_timeout = controller.current_timeout
                     started = time.perf_counter()
                     is_valid, reason = await ValidatorService.validate_source_access(
                         url,
                         request_timeout,
                         client=client,
-                        max_retries=options.max_retries,
+                        max_retries=0,
                     )
                     duration = time.perf_counter() - started
-                    return source, url, name, is_valid, reason, duration
+                    return work_item, url, name, is_valid, reason, duration
 
                 async with ValidatorService.create_validation_client(options.timeout) as client:
-                    while pending_sources or running_tasks:
+                    while work_queue.has_work or running_tasks:
                         if session.status == "cancelled":
                             for task in running_tasks:
                                 task.cancel()
@@ -635,18 +645,46 @@ async def get_validation_progress(session_id: str):
                             await asyncio.sleep(0.3)
                             continue
 
-                        while (
-                            pending_sources
-                            and len(running_tasks) < controller.current_concurrency
-                            and session.status == "running"
-                        ):
-                            task = asyncio.create_task(validate_single(pending_sources.pop(0), client))
+                        work_queue.advance_phase(
+                            active_count=len(running_tasks),
+                        )
+                        session.validation_phase = work_queue.phase
+                        active_limit = controller.current_concurrency
+                        if work_queue.phase == "retry":
+                            active_limit = min(
+                                active_limit,
+                                controller.min_concurrency,
+                            )
+
+                        capacity = max(
+                            0,
+                            active_limit - len(running_tasks),
+                        )
+                        ready_items = work_queue.take_ready(
+                            limit=capacity,
+                            now=time.monotonic(),
+                        )
+                        for work_item in ready_items:
+                            if work_item.attempt > 0:
+                                session.retry_attempts += 1
+                            task = asyncio.create_task(
+                                validate_single(
+                                    work_item,
+                                    client,
+                                    controller.current_timeout,
+                                )
+                            )
                             running_tasks.add(task)
 
                         validation_tasks = list(running_tasks)
                         session.validation_tasks = validation_tasks
                         if not running_tasks:
-                            await asyncio.sleep(0.1)
+                            delay = work_queue.next_delay(
+                                now=time.monotonic(),
+                            )
+                            await asyncio.sleep(
+                                min(delay if delay is not None else 0.1, 0.3)
+                            )
                             continue
 
                         done, running_tasks = await asyncio.wait(
@@ -663,14 +701,67 @@ async def get_validation_progress(session_id: str):
                                 logger.warning("单个书源校验异常: session_id=%s error=%s", session_id, exc)
                                 continue
 
-                            source, url, name, is_valid, reason, duration = task.result()
-                            processed += 1
-                            if is_valid:
-                                valid_sources.append(source)
-                            else:
-                                append_failed_source(failed_sources, reason, source, url, name)
+                            (
+                                work_item,
+                                url,
+                                name,
+                                is_valid,
+                                reason,
+                                duration,
+                            ) = task.result()
+                            if work_item.attempt == 0:
+                                adjustment = controller.record(
+                                    duration,
+                                    is_valid,
+                                    reason,
+                                )
+                                if adjustment is not None:
+                                    logger.info(
+                                        "智能策略评估: session_id=%s phase=%s "
+                                        "samples=%s network_error_rate=%.3f "
+                                        "timeout_rate=%.3f p75=%.2f "
+                                        "concurrency=%s->%s timeout=%s->%s "
+                                        "reason=%s",
+                                        session_id,
+                                        session.validation_phase,
+                                        adjustment.sample_count,
+                                        adjustment.network_error_rate,
+                                        adjustment.timeout_rate,
+                                        adjustment.p75_duration,
+                                        adjustment.previous_concurrency,
+                                        adjustment.current_concurrency,
+                                        adjustment.previous_timeout,
+                                        adjustment.current_timeout,
+                                        adjustment.reason,
+                                    )
 
-                            controller.record(duration, is_valid, reason)
+                            scheduled_retry = False
+                            if not is_valid and is_retryable_reason(reason):
+                                if work_item.attempt == 0:
+                                    session.primary_network_failures += 1
+                                scheduled_retry = work_queue.schedule_retry(
+                                    work_item,
+                                    reason,
+                                    now=time.monotonic(),
+                                    delay=get_retry_delay(
+                                        work_item.attempt,
+                                        settings.RETRY_DELAY,
+                                    ),
+                                )
+
+                            if not scheduled_retry:
+                                processed += 1
+                                if is_valid:
+                                    valid_sources.append(work_item.source)
+                                else:
+                                    append_failed_source(
+                                        failed_sources,
+                                        reason,
+                                        work_item.source,
+                                        url,
+                                        name,
+                                    )
+
                             snapshot = controller.snapshot()
                             session.current_concurrency = snapshot["currentConcurrency"]
                             session.current_timeout = snapshot["currentTimeout"]
@@ -691,7 +782,9 @@ async def get_validation_progress(session_id: str):
                     log_method = logger.warning if elapsed >= SLOW_VALIDATION_SECONDS else logger.info
                     log_method(
                         "SSE校验完成: session_id=%s total=%s valid=%s invalid=%s "
-                        "concurrency=%s timeout=%s duration=%.2fs",
+                        "concurrency=%s timeout=%s duration=%.2fs "
+                        "final_concurrency=%s final_timeout=%s "
+                        "primary_network_failures=%s retries=%s",
                         session_id,
                         total,
                         len(valid_sources),
@@ -699,6 +792,10 @@ async def get_validation_progress(session_id: str):
                         session.concurrency,
                         session.timeout,
                         elapsed,
+                        session.current_concurrency,
+                        session.current_timeout,
+                        session.primary_network_failures,
+                        session.retry_attempts,
                     )
 
             except asyncio.CancelledError:
