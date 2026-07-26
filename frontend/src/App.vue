@@ -321,6 +321,7 @@ import { useSources } from './composables/useSources.js'
 import { useToast } from './composables/useToast.js'
 import { parseFile, parseUrl, startValidation, startValidationFromData, getProgressEventSource, getSearchProgressEventSource, cancelValidation, pauseValidation, resumeValidation, startBatchFilesValidation, startBatchUrlsValidation, parseBatchFiles, parseBatchUrls, startSearchValidation, startSearchValidationFromData, createBookSourceExport } from './api/sources.js'
 import { downloadJson, formatDate, buildAbsoluteUrl, buildLegadoImportUrl, openExternalUrl } from './utils/download.js'
+import { bindEventSourceRecovery } from './utils/eventSourceRecovery.js'
 import { ref, computed, onMounted, watch, onUnmounted } from 'vue'
 
 const {
@@ -377,6 +378,30 @@ const lastSearchConfig = ref({
   keyword: '玄幻'
 })
 let eventSource = null
+
+function enableEventSourceRecovery(source, label = '校验') {
+  bindEventSourceRecovery(source, {
+    isActive: () => source === eventSource && state.validating,
+    onDisconnect: () => {
+      if (progressData.value) {
+        progressData.value = {
+          ...progressData.value,
+          status: 'reconnecting'
+        }
+      }
+      showWarning(`${label}连接暂时中断，正在自动恢复，服务器仍在校验`)
+    },
+    onReconnect: () => {
+      if (progressData.value?.status === 'reconnecting') {
+        progressData.value = {
+          ...progressData.value,
+          status: 'running'
+        }
+      }
+      showSuccess(`${label}连接已恢复`)
+    }
+  })
+}
 
 // 耗时计算
 const elapsedTime = ref(0)
@@ -769,12 +794,7 @@ async function handleFullValidateFile() {
       }
     }
 
-    eventSource.onerror = () => {
-      stopTimer()
-      eventSource.close()
-      showError('连接中断，请重试')
-      setValidating(false)
-    }
+    enableEventSourceRecovery(eventSource)
 
   } catch (err) {
     stopTimer()
@@ -896,12 +916,7 @@ async function handleFullValidateUrl() {
       }
     }
 
-    eventSource.onerror = () => {
-      stopTimer()
-      eventSource.close()
-      showError('连接中断，请重试')
-      setValidating(false)
-    }
+    enableEventSourceRecovery(eventSource)
 
   } catch (err) {
     stopTimer()
@@ -1070,12 +1085,7 @@ async function handleBatchProcess({ type, data, mode }) {
       }
     }
 
-    eventSource.onerror = () => {
-      stopTimer()
-      eventSource.close()
-      showError('连接中断，请重试')
-      setValidating(false)
-    }
+    enableEventSourceRecovery(eventSource, '批量校验')
 
   } catch (err) {
     stopTimer()
@@ -1190,10 +1200,6 @@ async function handleSearchValidation(payload) {
       throw esError
     }
 
-    eventSource.onopen = (event) => {
-      console.log('SSE 连接已打开:', event)
-    }
-
     eventSource.onmessage = (event) => {
       console.log('SSE 消息:', event.data)
       const data = JSON.parse(event.data)
@@ -1274,13 +1280,7 @@ async function handleSearchValidation(payload) {
       }
     }
 
-    eventSource.onerror = () => {
-      console.error('搜索校验 SSE 连接错误')
-      stopTimer()
-      eventSource.close()
-      showError('连接中断，请重试')
-      setValidating(false)
-    }
+    enableEventSourceRecovery(eventSource, '搜索校验')
 
   } catch (err) {
     console.error('搜索校验异常:', err)
@@ -1476,12 +1476,7 @@ async function handleRetryFailed(onlyNetwork) {
       }
     }
 
-    eventSource.onerror = () => {
-      stopTimer()
-      eventSource.close()
-      setValidating(false)
-      showError('重试连接中断，请稍后再试')
-    }
+    enableEventSourceRecovery(eventSource, '失败重试')
   } catch (err) {
     stopTimer()
     setValidating(false)

@@ -173,3 +173,63 @@ def test_cancel_while_paused_keeps_requests_completed_during_pause(
     assert not stream_thread.is_alive()
     assert stream_result["validCount"] == 1
     assert stream_result["validSources"][0]["bookSourceName"] == "one"
+
+
+def test_completed_sse_result_can_be_replayed_without_rerunning(monkeypatch):
+    """A reconnect after completion should receive the retained result."""
+    calls = 0
+
+    async def fake_validate(
+        url,
+        timeout=None,
+        client=None,
+        max_retries=None,
+    ):
+        nonlocal calls
+        calls += 1
+        return True, ""
+
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_source_access",
+        staticmethod(fake_validate),
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/validate/start-data",
+        json={
+            "sources": [
+                {
+                    "bookSourceName": "one",
+                    "bookSourceUrl": "https://example.com/1",
+                },
+            ],
+            "concurrency": 1,
+            "timeout": 30,
+            "validation_mode": "custom",
+            "smart_enabled": True,
+        },
+    )
+    session_id = response.json()["sessionId"]
+
+    def consume_terminal_event():
+        with client.stream(
+            "GET",
+            f"/api/validate/progress/{session_id}",
+        ) as stream:
+            for line in stream.iter_lines():
+                if not line.startswith("data: "):
+                    continue
+                event = json.loads(line[6:])
+                if event.get("status") == "completed" or event.get("error"):
+                    return event
+        return None
+
+    first_result = consume_terminal_event()
+    second_result = consume_terminal_event()
+
+    assert first_result["status"] == "completed"
+    assert second_result["status"] == "completed"
+    assert second_result["validCount"] == 1
+    assert calls == 1

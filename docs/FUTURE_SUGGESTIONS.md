@@ -14,6 +14,11 @@
 - `docs/sessions/SESSION_10_PRODUCTION_DEPLOYMENT.md`
 - `docs/sessions/SESSION_11_FEATURE_OPTIMIZATION.md`
 - `docs/sessions/SESSION_12_MOBILE_EXPORT_AND_ADAPTATION.md`
+- `docs/sessions/SESSION_13_MOBILE_REAL_DEVICE_FEEDBACK.md`
+- `docs/sessions/SESSION_14_LOG_ROTATION_AND_SERVICE_LOGS.md`
+- `docs/sessions/SESSION_15_ADAPTIVE_VALIDATION_AND_RECOVERY.md`
+- `docs/sessions/SESSION_16_ADAPTIVE_THROUGHPUT_OPTIMIZATION.md`
+- `docs/sessions/SESSION_17_MOBILE_SSE_RECOVERY.md`
 - `docs/手机真机测试清单.md`
 - `docs/部署指南.md`
 - 2026-03-30 手机同 Wi-Fi 联调排查记录
@@ -99,10 +104,12 @@
 - 已支持暂停/恢复校验能力
 - 已支持取消校验后保留已完成结果
 - 搜索校验已支持从失败书源数据重试，不必重新上传完整文件
+- 已支持 SSE 断线后自动订阅同一个会话，服务器任务不中断也不重复启动
+- 已支持完成、取消和错误结果保留 30 分钟，便于手机网络恢复后取回
 
 后续增强方向：
 
-- 断线后自动恢复同一个会话，而不是依赖用户重新发起
+- 页面被浏览器完整刷新或系统回收后，恢复最近一次会话
 - 为暂停状态增加更明确的队列长度和已发出请求数量
 - 对失败重试结果做更细的前端合并提示
 
@@ -128,9 +135,11 @@
 ### 3. SSE 稳定性
 
 - 增加 SSE 心跳，降低长连接被中间层断开的概率
-- 增加断线自动重连和重连后的状态恢复
+- 已增加断线自动重连和重连后的状态恢复，断线期间保持进度区并提示服务器仍在校验
+- 已限制同一会话只运行一个后台 runner，重复订阅不会重复执行整批校验
+- 已增加终态会话 30 分钟保留和惰性自动清理
 - 显示实时速度、队列长度、当前并发数
-- 增加会话自动清理和并发任务上限
+- 增加全局并发任务上限
 
 ### 4. 失败分析与可诊断性
 
@@ -338,7 +347,7 @@
 |------|------|
 | URL 去重与基础校验 | SESSION_01, SESSION_03 |
 | 并发、超时、重试、结果缓存 | SESSION_02, SESSION_03, SESSION_15 |
-| SSE 进度与会话管理 | SESSION_04, SESSION_11, SESSION_15 |
+| SSE 进度与会话管理 | SESSION_04, SESSION_11, SESSION_15, SESSION_17 |
 | UI/UX 与结果区体验 | SESSION_05, SESSION_07 |
 | 批量处理与大文件场景 | SESSION_06, SESSION_07 |
 | 搜索校验与组合模式 | SESSION_08, SESSION_15 |
@@ -357,5 +366,5 @@
 
 ---
 
-**文档版本**：v2.0
-**最后更新**：2026-03-30
+**文档版本**：v2.1
+**最后更新**：2026-07-26

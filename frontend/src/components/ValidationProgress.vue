@@ -1,7 +1,7 @@
 <template>
   <div class="progress-container">
     <div class="progress-header">
-      <span class="progress-title">🔍 深度校验进行中...</span>
+      <span class="progress-title">{{ progressTitle }}</span>
       <span class="progress-count">{{ processed }} / {{ total }}</span>
     </div>
 
@@ -95,6 +95,16 @@ defineEmits(['cancel', 'pause', 'resume'])
 const percentage = computed(() => {
   if (props.total === 0) return 0
   return Math.round((props.processed / props.total) * 100)
+})
+
+const progressTitle = computed(() => {
+  if (props.status === 'reconnecting') {
+    return '连接恢复中，服务器仍在校验...'
+  }
+  if (props.status === 'paused') {
+    return '深度校验已暂停'
+  }
+  return '深度校验进行中...'
 })
 
 const strategyLabel = computed(() => {

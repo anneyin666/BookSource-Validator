@@ -586,10 +586,6 @@ async def get_validation_progress(session_id: str):
             yield f"data: {json.dumps({'error': 'Session not found'})}\n\n"
             return
 
-        # 标记运行中
-        async with session_manager._lock:
-            session.status = "running"
-
         # 存储校验任务，用于取消
         validation_tasks = []
 
@@ -826,10 +822,10 @@ async def get_validation_progress(session_id: str):
                 logger.info("SSE校验任务被取消: session_id=%s duration=%.2fs", session_id, elapsed)
             except Exception:
                 logger.exception("SSE校验异常: session_id=%s", session_id)
-                session.status = "error"
+                await session_manager.fail_session(session_id)
 
-        # 后台运行校验
-        validation_task = asyncio.create_task(run_validation())
+        # 校验任务独立于 SSE 连接；重连只订阅已有任务。
+        await session_manager.ensure_runner(session_id, run_validation)
 
         # 持续推送进度（直接使用 session 引用，不加锁）
         while True:
@@ -910,8 +906,6 @@ async def get_validation_progress(session_id: str):
                 elif session.status == "error":
                     yield f"data: {json.dumps({'status': 'error', 'error': '校验过程发生错误'})}\n\n"
 
-                # 清理会话
-                await session_manager.delete_session(session_id)
                 break
 
             # 发送进度消息（不包含 completed 状态）
@@ -1556,10 +1550,6 @@ async def get_search_validation_progress(session_id: str):
 
         logger.info(f"搜索校验开始: session_id={session_id}, total={session.total}")
 
-        # 标记运行中
-        async with session_manager._lock:
-            session.status = "running"
-
         # 启动校验任务
         async def run_validation():
             started_at = time.perf_counter()
@@ -1829,10 +1819,10 @@ async def get_search_validation_progress(session_id: str):
 
             except Exception:
                 logger.exception("搜索校验异常: session_id=%s", session_id)
-                session.status = "error"
+                await session_manager.fail_session(session_id)
 
-        # 后台运行校验
-        asyncio.create_task(run_validation())
+        # 校验任务独立于 SSE 连接；重连只订阅已有任务。
+        await session_manager.ensure_runner(session_id, run_validation)
 
         # 持续推送进度（直接使用 session 引用，不加锁）
         while True:
@@ -1889,8 +1879,6 @@ async def get_search_validation_progress(session_id: str):
                 elif session.status == "error":
                     yield f"data: {json.dumps({'status': 'error', 'error': '校验过程发生错误'})}\n\n"
 
-                # 清理会话
-                await session_manager.delete_session(session_id)
                 break
 
             # 发送进度消息

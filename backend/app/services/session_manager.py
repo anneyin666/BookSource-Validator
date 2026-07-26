@@ -2,8 +2,12 @@
 import asyncio
 import uuid
 import time
-from typing import Dict, Optional, List, Any
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
+
+
+TERMINAL_STATUSES = {"completed", "cancelled", "error"}
+DEFAULT_RETENTION_SECONDS = 30 * 60
 
 
 @dataclass
@@ -47,14 +51,35 @@ class ValidationSession:
     start_time: float = 0.0  # 开始时间戳
     # 任务引用（用于取消）
     validation_tasks: List[Any] = field(default_factory=list)
+    runner_task: Optional[asyncio.Task[Any]] = field(
+        default=None,
+        repr=False,
+    )
+    finished_at: float = 0.0
 
 
 class SessionManager:
     """会话管理器"""
 
-    def __init__(self):
+    def __init__(
+        self,
+        retention_seconds: int = DEFAULT_RETENTION_SECONDS,
+    ):
         self._sessions: Dict[str, ValidationSession] = {}
         self._lock = asyncio.Lock()
+        self._retention_seconds = retention_seconds
+
+    def _cleanup_expired_locked(self, now: float) -> None:
+        """Remove terminal sessions whose reconnect window has elapsed."""
+        expired_ids = [
+            session_id
+            for session_id, session in self._sessions.items()
+            if session.status in TERMINAL_STATUSES
+            and session.finished_at > 0
+            and now - session.finished_at >= self._retention_seconds
+        ]
+        for session_id in expired_ids:
+            self._sessions.pop(session_id, None)
 
     async def create_session(
         self,
@@ -81,15 +106,48 @@ class SessionManager:
             start_time=time.time()  # 记录开始时间
         )
         async with self._lock:
+            self._cleanup_expired_locked(time.time())
             self._sessions[session_id] = session
         return session_id
 
     async def get_session(self, session_id: str) -> Optional[ValidationSession]:
         """获取会话"""
         async with self._lock:
+            self._cleanup_expired_locked(time.time())
             return self._sessions.get(session_id)
 
-    async def update_progress(self, session_id: str, processed: int, valid: int, invalid: int, current_url: str, current_name: str = ""):
+    async def ensure_runner(
+        self,
+        session_id: str,
+        runner_factory: Callable[[], Awaitable[None]],
+    ) -> Optional[asyncio.Task[Any]]:
+        """Start and retain exactly one validation runner for a session."""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return None
+            if session.runner_task is not None:
+                return session.runner_task
+            if session.status in TERMINAL_STATUSES:
+                return None
+
+            if session.status == "pending":
+                session.status = "running"
+            session.runner_task = asyncio.create_task(
+                runner_factory(),
+                name=f"validation-{session_id}",
+            )
+            return session.runner_task
+
+    async def update_progress(
+        self,
+        session_id: str,
+        processed: int,
+        valid: int,
+        invalid: int,
+        current_url: str,
+        current_name: str = "",
+    ) -> None:
         """更新进度"""
         async with self._lock:
             session = self._sessions.get(session_id)
@@ -100,7 +158,12 @@ class SessionManager:
                 session.current_url = current_url
                 session.current_name = current_name
 
-    async def complete_session(self, session_id: str, valid_sources: List[dict], failed_sources: Dict[str, List[dict]]):
+    async def complete_session(
+        self,
+        session_id: str,
+        valid_sources: List[dict],
+        failed_sources: Dict[str, List[dict]],
+    ) -> None:
         """完成会话"""
         async with self._lock:
             session = self._sessions.get(session_id)
@@ -108,6 +171,15 @@ class SessionManager:
                 session.status = "completed"
                 session.valid_sources = valid_sources
                 session.failed_sources = failed_sources
+                session.finished_at = time.time()
+
+    async def fail_session(self, session_id: str) -> None:
+        """Mark a validation session as failed and retain it for recovery."""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session:
+                session.status = "error"
+                session.finished_at = time.time()
 
     async def pause_session(self, session_id: str):
         """暂停会话。已发出的请求不强制中断，后续队列暂停启动。"""
@@ -129,6 +201,7 @@ class SessionManager:
             session = self._sessions.get(session_id)
             if session:
                 session.status = "cancelled"
+                session.finished_at = time.time()
                 # 取消所有正在运行的任务
                 for task in session.validation_tasks:
                     if not task.done():
