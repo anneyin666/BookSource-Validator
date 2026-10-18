@@ -490,7 +490,24 @@ npm run preview
 
 详细文档：[SESSION_23](docs/sessions/SESSION_23_APP_VUE_SPLIT.md)
 
+### 会话 24 - 2026-10-18
+
+**主题**：搜索校验接入自适应调度器（P2 收尾）
+
+**完成任务**：
+1. 搜索/发现校验复用 `AdaptiveWorkQueue + AdaptiveValidationController`
+   （首轮优先、指数退避重试、动态并发/超时）
+2. 仅网络类失败重试，规则类失败（无规则/HTTP 4xx）直接判定
+3. 暂停/取消语义与深度校验统一；进度消息增加 `strategy.phase`
+4. 修复单模式有效书源 `_ruleType` 缺失导致的规则类型统计为 0
+5. 结果接口剥离 `_ruleType` 等内部字段，避免污染导出文件
+6. 新增 3 个搜索 SSE 测试（重试成功/不重试规则失败/暂停后取消）
+
+**验证**：pytest 52 → **55 passed**；真实 12 条书源验证统计与重试阶段正常
+
+详细文档：[SESSION_24](docs/sessions/SESSION_24_SEARCH_ADAPTIVE_SCHEDULER.md)
+
 ---
 
-文档版本：v1.8
+文档版本：v1.9
 最后更新：2026-10-18

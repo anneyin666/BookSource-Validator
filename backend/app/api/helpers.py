@@ -156,10 +156,20 @@ def build_strategy_payload(session) -> dict:
 
 def build_session_result(session) -> dict:
     """构造完整校验结果（供结果接口使用，含书源明细）。"""
-    valid_sources = session.valid_sources
+    raw_valid_sources = session.valid_sources
     failed_sources = session.failed_sources
     failed_groups = build_failed_groups(failed_sources)
     invalid_count = sum(len(items) for items in failed_sources.values())
+
+    # 内部字段（_ruleType 等）只用于统计，不下发给前端/导出文件
+    valid_sources = [
+        {
+            key: value
+            for key, value in source.items()
+            if not str(key).startswith('_')
+        }
+        for source in raw_valid_sources
+    ]
 
     result = {
         "status": session.status,
@@ -179,7 +189,7 @@ def build_session_result(session) -> dict:
     }
     if session.is_search:
         result["ruleTypeStats"] = calculate_rule_type_stats(
-            valid_sources, failed_sources
+            raw_valid_sources, failed_sources
         )
     return result
 

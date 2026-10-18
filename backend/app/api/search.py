@@ -10,9 +10,16 @@ from fastapi.responses import StreamingResponse
 
 from app.api.helpers import build_strategy_payload, validate_runtime_options
 from app.api.ingest import load_sources_from_upload
+from app.config import settings
 from app.services.search_validator import SearchValidatorService
 from app.services.session_manager import session_manager
-from app.services.validation_strategy import ValidationOptions
+from app.services.validation_scheduler import AdaptiveWorkQueue
+from app.services.validation_strategy import (
+    AdaptiveValidationController,
+    ValidationOptions,
+    get_retry_delay,
+    is_retryable_reason,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -186,13 +193,6 @@ async def get_search_validation_progress(session_id: str):
         async def run_validation():
             started_at = time.perf_counter()
             try:
-                logger.info(f"启动校验任务: validate_type={getattr(session, 'validate_type', 'search')}, keyword={getattr(session, 'search_keyword', '玄幻')}")
-                valid_sources = []
-                failed_sources = {}
-                total = len(session.sources)
-                processed = 0
-                lock = asyncio.Lock()
-                semaphore = asyncio.Semaphore(session.concurrency)
                 options = ValidationOptions(
                     concurrency=session.concurrency,
                     timeout=session.timeout,
@@ -200,242 +200,269 @@ async def get_search_validation_progress(session_id: str):
                     smart_enabled=session.smart_enabled,
                     max_retries=session.max_retries,
                 )
-
+                controller = AdaptiveValidationController(options)
+                work_queue = AdaptiveWorkQueue(
+                    session.sources,
+                    options.max_retries,
+                )
                 keyword = getattr(session, 'search_keyword', '玄幻')
                 validate_type = getattr(session, 'validate_type', 'search')
 
-                async def validate_single(source):
-                    nonlocal processed, valid_sources, failed_sources
+                valid_sources = []
+                failed_sources = {}
+                processed = 0
+                running_tasks = set()
+
+                def record_failure(reason, source, url, name, rule_type):
+                    if reason not in failed_sources:
+                        failed_sources[reason] = []
+                    failed_source = source.copy()
+                    failed_source.update({
+                        'url': url,
+                        'name': name,
+                        'reason': reason,
+                        '_failureReason': reason,
+                        '_ruleType': rule_type,
+                    })
+                    failed_sources[reason].append(failed_source)
+
+                async def validate_single(work_item, request_timeout):
+                    source = work_item.source
                     url = source.get('bookSourceUrl', '')
                     name = source.get('bookSourceName', '')
+                    started = time.perf_counter()
+                    has_search = SearchValidatorService.has_search_rule(source)
+                    has_explore = SearchValidatorService.has_explore_rule(source)
 
-                    # 检查是否已取消（直接读取 session 状态，不加锁）
-                    if session.status == "cancelled":
-                        return
-                    while session.status == "paused":
-                        await asyncio.sleep(0.3)
+                    if validate_type == 'search':
+                        if not has_search:
+                            return (
+                                work_item, url, name, False,
+                                '无搜索规则',
+                                time.perf_counter() - started, '仅搜索',
+                            )
+                        is_valid, reason, _ = await SearchValidatorService.validate_search(
+                            source, keyword, request_timeout, max_retries=0
+                        )
+                        rule_type = '仅搜索'
+                    elif validate_type == 'explore':
+                        if not has_explore:
+                            return (
+                                work_item, url, name, False,
+                                '无发现规则',
+                                time.perf_counter() - started, '仅发现',
+                            )
+                        is_valid, reason, _ = await SearchValidatorService.validate_explore(
+                            source, request_timeout, max_retries=0
+                        )
+                        rule_type = '仅发现'
+                    else:
+                        if not has_search and not has_explore:
+                            return (
+                                work_item, url, name, False,
+                                '无规则',
+                                time.perf_counter() - started, '无规则',
+                            )
+                        search_valid = False
+                        search_reason = ''
+                        explore_valid = False
+                        explore_reason = ''
+                        if has_search:
+                            search_valid, search_reason, _ = await SearchValidatorService.validate_search(
+                                source, keyword, request_timeout, max_retries=0
+                            )
+                        if has_explore:
+                            explore_valid, explore_reason, _ = await SearchValidatorService.validate_explore(
+                                source, request_timeout, max_retries=0
+                            )
+                        is_valid = search_valid or explore_valid
+                        if is_valid:
+                            reason = ''
+                        else:
+                            reasons = []
+                            if has_search and not search_valid:
+                                reasons.append('搜索:%s' % (search_reason or '未知错误'))
+                            if has_explore and not explore_valid:
+                                reasons.append('发现:%s' % (explore_reason or '未知错误'))
+                            reason = '; '.join(reasons) if reasons else '校验失败'
+                        rule_type = (
+                            '搜索+发现' if has_search and has_explore
+                            else ('仅搜索' if has_search else '仅发现')
+                        )
 
-                    async with semaphore:
-                        # 再次检查取消状态（直接读取，不加锁）
-                        if session.status == "cancelled":
-                            return
-                        while session.status == "paused":
+                    return (
+                        work_item, url, name, is_valid, reason,
+                        time.perf_counter() - started, rule_type,
+                    )
+
+                def process_completed_tasks(done_tasks):
+                    nonlocal processed
+                    for task in done_tasks:
+                        if task.cancelled():
+                            continue
+                        exc = task.exception()
+                        if exc:
+                            logger.warning(
+                                '单个搜索校验异常: session_id=%s error=%s',
+                                session_id,
+                                exc,
+                            )
+                            continue
+
+                        (
+                            work_item, url, name, is_valid, reason,
+                            duration, rule_type,
+                        ) = task.result()
+
+                        if work_item.attempt == 0:
+                            adjustment = controller.record(
+                                duration,
+                                is_valid,
+                                reason,
+                            )
+                            if adjustment is not None:
+                                logger.info(
+                                    '搜索校验智能策略: session_id=%s phase=%s '
+                                    'samples=%s network_error_rate=%.3f timeout_rate=%.3f '
+                                    'p75=%.2f concurrency=%s->%s timeout=%s->%s reason=%s',
+                                    session_id,
+                                    session.validation_phase,
+                                    adjustment.sample_count,
+                                    adjustment.network_error_rate,
+                                    adjustment.timeout_rate,
+                                    adjustment.p75_duration,
+                                    adjustment.previous_concurrency,
+                                    adjustment.current_concurrency,
+                                    adjustment.previous_timeout,
+                                    adjustment.current_timeout,
+                                    adjustment.reason,
+                                )
+                            if not is_valid and is_retryable_reason(reason):
+                                session.primary_network_failures += 1
+
+                        scheduled_retry = False
+                        if not is_valid and is_retryable_reason(reason):
+                            scheduled_retry = work_queue.schedule_retry(
+                                work_item,
+                                reason,
+                                now=time.monotonic(),
+                                delay=get_retry_delay(
+                                    work_item.attempt,
+                                    settings.RETRY_DELAY,
+                                ),
+                            )
+
+                        if not scheduled_retry:
+                            processed += 1
+                            if is_valid:
+                                # 记录规则类型用于统计（结果接口返回前会剥离内部字段）
+                                source_with_type = work_item.source.copy()
+                                source_with_type['_ruleType'] = rule_type
+                                valid_sources.append(source_with_type)
+                            else:
+                                record_failure(
+                                    reason,
+                                    work_item.source,
+                                    url,
+                                    name,
+                                    rule_type,
+                                )
+
+                        snapshot = controller.snapshot()
+                        session.current_concurrency = snapshot['currentConcurrency']
+                        session.current_timeout = snapshot['currentTimeout']
+                        total_failed = sum(
+                            len(items) for items in failed_sources.values()
+                        )
+                        session.processed = processed
+                        session.valid = len(valid_sources)
+                        session.invalid = total_failed
+                        session.current_url = url
+                        session.current_name = name
+                        session.valid_sources = valid_sources
+                        session.failed_sources = failed_sources
+
+                while work_queue.has_work or running_tasks:
+                    if session.status == 'cancelled':
+                        completed_tasks = {
+                            task for task in running_tasks if task.done()
+                        }
+                        for task in running_tasks - completed_tasks:
+                            task.cancel()
+                        process_completed_tasks(completed_tasks)
+                        break
+
+                    if session.status == 'paused':
+                        if not running_tasks:
                             await asyncio.sleep(0.3)
+                            continue
+                        done, running_tasks = await asyncio.wait(
+                            running_tasks,
+                            timeout=0.3,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        process_completed_tasks(done)
+                        continue
 
-                        # 组合模式：分别校验搜索和发现
-                        if validate_type == 'both':
-                            has_search = SearchValidatorService.has_search_rule(source)
-                            has_explore = SearchValidatorService.has_explore_rule(source)
+                    work_queue.advance_phase(active_count=len(running_tasks))
+                    session.validation_phase = work_queue.phase
+                    active_limit = controller.current_concurrency
+                    if work_queue.phase == 'retry':
+                        active_limit = min(
+                            active_limit,
+                            controller.min_concurrency,
+                        )
 
-                            # 没有任何规则，跳过
-                            if not has_search and not has_explore:
-                                async with lock:
-                                    processed += 1
-                                    if "无规则" not in failed_sources:
-                                        failed_sources["无规则"] = []
-                                    # 保存完整书源信息
-                                    failed_source = source.copy()
-                                    failed_source['_failureReason'] = '无规则'
-                                    failed_source['_ruleType'] = '无规则'
-                                    failed_sources["无规则"].append(failed_source)
-                                    total_failed = sum(len(v) for v in failed_sources.values())
-                                    # 直接更新 session 进度（不加锁）
-                                    session.processed = processed
-                                    session.valid = len(valid_sources)
-                                    session.invalid = total_failed
-                                    session.current_url = url
-                                    session.current_name = name
-                                    session.valid_sources = valid_sources
-                                    session.failed_sources = failed_sources
-                                return
-
-                            search_valid = False
-                            search_reason = ""
-                            explore_valid = False
-                            explore_reason = ""
-
-                            # 校验搜索
-                            if has_search:
-                                search_valid, search_reason, _ = await SearchValidatorService.validate_search(
-                                    source,
-                                    keyword,
-                                    session.current_timeout,
-                                    max_retries=options.max_retries,
-                                )
-
-                            # 校验发现
-                            if has_explore:
-                                explore_valid, explore_reason, _ = await SearchValidatorService.validate_explore(
-                                    source,
-                                    session.current_timeout,
-                                    max_retries=options.max_retries,
-                                )
-
-                            async with lock:
-                                processed += 1
-
-                                # 至少一个有效就算通过
-                                if search_valid or explore_valid:
-                                    # 添加规则类型标记
-                                    source_with_type = source.copy()
-                                    if has_search and has_explore:
-                                        source_with_type['_ruleType'] = '搜索+发现'
-                                    elif has_search:
-                                        source_with_type['_ruleType'] = '仅搜索'
-                                    elif has_explore:
-                                        source_with_type['_ruleType'] = '仅发现'
-                                    valid_sources.append(source_with_type)
-                                else:
-                                    # 记录失败原因
-                                    reasons = []
-                                    if has_search and not search_valid:
-                                        reasons.append(f"搜索:{search_reason if search_reason else '未知错误'}")
-                                    if has_explore and not explore_valid:
-                                        reasons.append(f"发现:{explore_reason if explore_reason else '未知错误'}")
-                                    reason_str = "; ".join(reasons) if reasons else "校验失败"
-
-                                    if reason_str not in failed_sources:
-                                        failed_sources[reason_str] = []
-                                    # 保存完整书源信息
-                                    failed_source = source.copy()
-                                    failed_source['_failureReason'] = reason_str
-                                    failed_source['_ruleType'] = '仅搜索' if has_search and not has_explore else ('仅发现' if has_explore and not has_search else '搜索+发现')
-                                    failed_sources[reason_str].append(failed_source)
-
-                                total_failed = sum(len(v) for v in failed_sources.values())
-                                # 直接更新 session 进度（不加锁）
-                                session.processed = processed
-                                session.valid = len(valid_sources)
-                                session.invalid = total_failed
-                                session.current_url = url
-                                session.current_name = name
-                                session.valid_sources = valid_sources
-                                session.failed_sources = failed_sources
-
-                        # 单一模式：仅搜索或仅发现
-                        elif validate_type == 'search':
-                            # 先检查是否有搜索规则
-                            if not SearchValidatorService.has_search_rule(source):
-                                async with lock:
-                                    processed += 1
-                                    if "无搜索规则" not in failed_sources:
-                                        failed_sources["无搜索规则"] = []
-                                    # 保存完整书源信息
-                                    failed_source = source.copy()
-                                    failed_source['_failureReason'] = '无搜索规则'
-                                    failed_source['_ruleType'] = '仅发现'
-                                    failed_sources["无搜索规则"].append(failed_source)
-                                    total_failed = sum(len(v) for v in failed_sources.values())
-                                    # 直接更新 session 进度（不加锁）
-                                    session.processed = processed
-                                    session.valid = len(valid_sources)
-                                    session.invalid = total_failed
-                                    session.current_url = url
-                                    session.current_name = name
-                                    session.valid_sources = valid_sources
-                                    session.failed_sources = failed_sources
-                                return
-
-                            is_valid, reason, results = await SearchValidatorService.validate_search(
-                                source,
-                                keyword,
-                                session.current_timeout,
-                                max_retries=options.max_retries,
+                    capacity = max(0, active_limit - len(running_tasks))
+                    ready_items = work_queue.take_ready(
+                        limit=capacity,
+                        now=time.monotonic(),
+                    )
+                    for work_item in ready_items:
+                        if work_item.attempt > 0:
+                            session.retry_attempts += 1
+                        task = asyncio.create_task(
+                            validate_single(
+                                work_item,
+                                controller.current_timeout,
                             )
+                        )
+                        running_tasks.add(task)
 
-                            async with lock:
-                                processed += 1
-                                if is_valid:
-                                    valid_sources.append(source)
-                                else:
-                                    if reason not in failed_sources:
-                                        failed_sources[reason] = []
-                                    # 保存完整书源信息
-                                    failed_source = source.copy()
-                                    failed_source['_failureReason'] = reason
-                                    failed_source['_ruleType'] = '仅搜索'
-                                    failed_sources[reason].append(failed_source)
+                    session.validation_tasks = list(running_tasks)
+                    if not running_tasks:
+                        delay = work_queue.next_delay(now=time.monotonic())
+                        await asyncio.sleep(
+                            min(delay if delay is not None else 0.1, 0.3)
+                        )
+                        continue
 
-                                total_failed = sum(len(v) for v in failed_sources.values())
-                                # 直接更新 session 进度（不加锁）
-                                session.processed = processed
-                                session.valid = len(valid_sources)
-                                session.invalid = total_failed
-                                session.current_url = url
-                                session.current_name = name
-                                session.valid_sources = valid_sources
-                                session.failed_sources = failed_sources
+                    done, running_tasks = await asyncio.wait(
+                        running_tasks,
+                        timeout=0.3,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    process_completed_tasks(done)
 
-                        else:  # explore
-                            # 先检查是否有发现规则
-                            if not SearchValidatorService.has_explore_rule(source):
-                                async with lock:
-                                    processed += 1
-                                    if "无发现规则" not in failed_sources:
-                                        failed_sources["无发现规则"] = []
-                                    # 保存完整书源信息
-                                    failed_source = source.copy()
-                                    failed_source['_failureReason'] = '无发现规则'
-                                    failed_source['_ruleType'] = '仅搜索'
-                                    failed_sources["无发现规则"].append(failed_source)
-                                    total_failed = sum(len(v) for v in failed_sources.values())
-                                    # 直接更新 session 进度（不加锁）
-                                    session.processed = processed
-                                    session.valid = len(valid_sources)
-                                    session.invalid = total_failed
-                                    session.current_url = url
-                                    session.current_name = name
-                                    session.valid_sources = valid_sources
-                                    session.failed_sources = failed_sources
-                                return
-
-                            is_valid, reason, results = await SearchValidatorService.validate_explore(
-                                source,
-                                session.current_timeout,
-                                max_retries=options.max_retries,
-                            )
-
-                            async with lock:
-                                processed += 1
-                                if is_valid:
-                                    valid_sources.append(source)
-                                else:
-                                    if reason not in failed_sources:
-                                        failed_sources[reason] = []
-                                    # 保存完整书源信息
-                                    failed_source = source.copy()
-                                    failed_source['_failureReason'] = reason
-                                    failed_source['_ruleType'] = '仅发现'
-                                    failed_sources[reason].append(failed_source)
-
-                                total_failed = sum(len(v) for v in failed_sources.values())
-                                # 直接更新 session 进度（不加锁）
-                                session.processed = processed
-                                session.valid = len(valid_sources)
-                                session.invalid = total_failed
-                                session.current_url = url
-                                session.current_name = name
-                                session.valid_sources = valid_sources
-                                session.failed_sources = failed_sources
-
-                # 并发执行
-                logger.info(f"开始并发校验 {len(session.sources)} 个书源")
-                validation_tasks = [asyncio.create_task(validate_single(s)) for s in session.sources]
-                # 保存任务到 session，用于取消（直接访问，不加锁）
-                session.validation_tasks = validation_tasks
-                await asyncio.gather(*validation_tasks, return_exceptions=True)
-
-                # 只有未取消时才完成会话
-                if session.status != "cancelled":
-                    await session_manager.complete_session(session_id, valid_sources, failed_sources)
+                if session.status != 'cancelled':
+                    await session_manager.complete_session(
+                        session_id,
+                        valid_sources,
+                        failed_sources,
+                    )
                     elapsed = time.perf_counter() - started_at
                     invalid_count = sum(len(v) for v in failed_sources.values())
-                    log_method = logger.warning if elapsed >= SLOW_VALIDATION_SECONDS else logger.info
+                    log_method = (
+                        logger.warning
+                        if elapsed >= SLOW_VALIDATION_SECONDS
+                        else logger.info
+                    )
                     log_method(
-                        "搜索校验完成: session_id=%s total=%s valid=%s invalid=%s "
-                        "type=%s keyword=%s concurrency=%s timeout=%s duration=%.2fs",
+                        '搜索校验完成: session_id=%s total=%s valid=%s invalid=%s '
+                        'type=%s keyword=%s concurrency=%s timeout=%s duration=%.2fs '
+                        'final_concurrency=%s final_timeout=%s retries=%s',
                         session_id,
-                        total,
+                        len(session.sources),
                         len(valid_sources),
                         invalid_count,
                         validate_type,
@@ -443,14 +470,21 @@ async def get_search_validation_progress(session_id: str):
                         session.concurrency,
                         session.timeout,
                         elapsed,
+                        session.current_concurrency,
+                        session.current_timeout,
+                        session.retry_attempts,
                     )
 
             except asyncio.CancelledError:
                 elapsed = time.perf_counter() - started_at
-                logger.info("搜索校验任务被取消: session_id=%s duration=%.2fs", session_id, elapsed)
+                logger.info(
+                    '搜索校验任务被取消: session_id=%s duration=%.2fs',
+                    session_id,
+                    elapsed,
+                )
 
             except Exception:
-                logger.exception("搜索校验异常: session_id=%s", session_id)
+                logger.exception('搜索校验异常: session_id=%s', session_id)
                 await session_manager.fail_session(session_id)
 
         # 校验任务独立于 SSE 连接；重连只订阅已有任务。
@@ -520,12 +554,7 @@ async def get_search_validation_progress(session_id: str):
                 "elapsed": round(elapsed, 1),
                 "estimatedRemaining": round(estimated_remaining, 1),
                 "status": session.status,
-                "strategy": {
-                    "mode": session.validation_mode,
-                    "smartEnabled": session.smart_enabled,
-                    "currentConcurrency": session.current_concurrency,
-                    "currentTimeout": session.current_timeout,
-                },
+                "strategy": build_strategy_payload(session),
             }
 
             yield f"data: {json.dumps(progress_data)}\n\n"

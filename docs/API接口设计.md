@@ -407,6 +407,15 @@
 }
 ```
 
+搜索校验说明：
+
+- 进度消息的 `strategy` 与深度校验一致，包含 `phase`（primary/retry）、
+  `currentConcurrency`、`currentTimeout`
+- 调度策略相同：首轮任务优先，全部结束后进入重试阶段；
+  只有网络类失败（超时/连接失败等）会重试，规则类失败（无搜索规则、HTTP 4xx 等）不重试
+- `ruleTypeStats` 对单一模式（仅搜索/仅发现）的有效与失效书源都会统计
+- 结果接口返回的 `validSources` 已剥离 `_ruleType` 等内部字段
+
 ## 8. 当前业务规则
 
 ### 8.1 书源提取
