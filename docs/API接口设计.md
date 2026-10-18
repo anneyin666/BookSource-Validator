@@ -90,8 +90,14 @@
 返回：
 
 ```json
-{ "status": "ok" }
+{
+  "status": "ok",
+  "presets": ["balanced", "fast", "stable", "turbo"]
+}
 ```
+
+`presets` 用于排查前后端版本不一致：如果前端已显示"极速"但这里没有 `turbo`，
+说明后端未更新或未重启。
 
 ### 4.2 单文件解析
 

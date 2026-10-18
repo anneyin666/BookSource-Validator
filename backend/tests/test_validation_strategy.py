@@ -205,6 +205,21 @@ def test_turbo_preset_forces_high_concurrency_and_disables_smart():
     assert options.smart_enabled is False
 
 
+def test_unknown_mode_keeps_client_values_instead_of_preset():
+    """Unknown modes (frontend/backend version mismatch) must not override client params."""
+    options = normalize_validation_options(
+        concurrency=48,
+        timeout=12,
+        mode="turbo2",
+        smart_enabled=False,
+    )
+
+    assert options.mode == "custom"
+    assert options.concurrency == 48
+    assert options.timeout == 12
+    assert options.smart_enabled is False
+
+
 def test_httpx_protocol_and_timeout_names_are_retryable():
     """httpx exception class names must enter the network retry path."""
     retryable_reasons = [

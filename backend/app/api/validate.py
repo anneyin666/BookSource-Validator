@@ -487,13 +487,7 @@ async def get_validation_progress(session_id: str):
                 "elapsed": round(elapsed, 1),
                 "estimatedRemaining": round(estimated_remaining, 1),
                 "status": session.status,
-                "strategy": {
-                    "mode": session.validation_mode,
-                    "smartEnabled": session.smart_enabled,
-                    "phase": session.validation_phase,
-                    "currentConcurrency": session.current_concurrency,
-                    "currentTimeout": session.current_timeout,
-                },
+                "strategy": build_strategy_payload(session),
             }
 
             yield f"data: {json.dumps(progress_data)}\n\n"

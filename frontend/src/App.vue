@@ -153,6 +153,7 @@
         :estimated-remaining="progressData.estimatedRemaining || 0"
         :status="progressData.status || 'running'"
         :strategy="progressData.strategy || null"
+        :requested-mode="validationMode"
         @pause="handlePauseValidation"
         @resume="handleResumeValidation"
         @cancel="handleCancelValidation"

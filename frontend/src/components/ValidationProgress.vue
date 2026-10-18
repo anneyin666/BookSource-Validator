@@ -24,6 +24,10 @@
       </span>
     </div>
 
+    <div class="mode-warning" v-if="modeMismatchHint">
+      ⚠️ {{ modeMismatchHint }}
+    </div>
+
     <div class="throttle-hint" v-if="throttleHint">
       ⚠️ {{ throttleHint }}
     </div>
@@ -91,6 +95,10 @@ const props = defineProps({
   strategy: {
     type: Object,
     default: null
+  },
+  requestedMode: {
+    type: String,
+    default: ''
   }
 })
 
@@ -128,6 +136,14 @@ const strategyLabel = computed(() => {
   const phase = phaseMap[props.strategy.phase] || ''
   const phaseText = phase ? ` · ${phase}` : ''
   return `${mode}${phaseText} · ${props.strategy.currentConcurrency || '-'}并发 · ${props.strategy.currentTimeout || '-'}秒`
+})
+
+// 策略未被后端识别（通常是后端版本过旧，未部署 turbo 等新模式）
+const modeMismatchHint = computed(() => {
+  const s = props.strategy
+  if (!s?.mode || !props.requestedMode) return ''
+  if (s.mode === props.requestedMode) return ''
+  return `后端未识别“${props.requestedMode}”策略，当前按 ${s.mode} 运行。可能后端版本过旧，请更新并重启后端`
 })
 
 // 智能策略降速提示：并发低于初始值或超时高于初始值时提示切换极速
@@ -229,6 +245,17 @@ function formatTime(seconds) {
 
 .stat-item.strategy {
   color: #bbf7d0;
+}
+
+.mode-warning {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  background: rgba(245, 108, 108, 0.12);
+  border: 1px solid rgba(245, 108, 108, 0.4);
+  border-radius: 6px;
+  font-size: 12px;
+  color: #c45656;
+  line-height: 1.5;
 }
 
 .throttle-hint {

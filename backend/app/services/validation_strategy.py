@@ -134,7 +134,9 @@ def normalize_validation_options(
     """Normalize validation mode, concurrency and timeout."""
     normalized_mode = (mode or DEFAULT_MODE).strip().lower()
     if normalized_mode not in PRESET_OPTIONS and normalized_mode != "custom":
-        normalized_mode = DEFAULT_MODE
+        # 未知模式常见于前后端版本不一致（如新前端 + 旧后端）。
+        # 回退到 custom，至少保留客户端传入的并发/超时，而不是被预设覆盖。
+        normalized_mode = "custom"
 
     preset = PRESET_OPTIONS.get(normalized_mode, {})
 

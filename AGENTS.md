@@ -574,7 +574,20 @@ npm run preview
 
 详细文档：[SESSION_29](docs/sessions/SESSION_29_TURBO_PRESET.md)
 
+### 会话 30 - 2026-10-18
+
+**主题**：策略版本不一致防护（极速未生效问题）
+
+**完成任务**：
+1. 未知 `validation_mode` 不再回退 `balanced`，改为 `custom` 并保留客户端并发/超时
+2. `/api/health` 返回支持的 `presets`，用于判断后端是否更新/重启
+3. 进度区新增"后端未识别策略"红色提示；深度校验补全 `maxConcurrency`/`baseTimeout`，降速提示全模式生效
+
+**验证**：后端 57 passed；实测 turbo 为 32 并发/10 秒/关闭智能
+
+详细文档：[SESSION_30](docs/sessions/SESSION_30_VERSION_MISMATCH_GUARD.md)
+
 ---
 
-文档版本：v2.4
+文档版本：v2.5
 最后更新：2026-10-18
