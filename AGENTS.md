@@ -520,7 +520,20 @@ npm run preview
 
 详细文档：[SESSION_25](docs/sessions/SESSION_25_BATCH_FLOW_SPLIT.md)
 
+### 会话 26 - 2026-10-18
+
+**主题**：单个处理流程拆分
+
+**完成任务**：
+1. 新增 `composables/useSingleProcess.js`：文件/在线链接去重、深度校验、粘贴解析
+2. App.vue 1461 → 1251 行
+3. 更新前端组件设计文档
+
+**验证**：前端 6 tests passed，构建成功
+
+详细文档：[SESSION_26](docs/sessions/SESSION_26_SINGLE_FLOW_SPLIT.md)
+
 ---
 
-文档版本：v2.0
+文档版本：v2.1
 最后更新：2026-10-18
