@@ -547,7 +547,20 @@ npm run preview
 
 详细文档：[SESSION_27](docs/sessions/SESSION_27_FRONTEND_FINAL_SPLIT.md)
 
+### 会话 28 - 2026-10-18
+
+**主题**：结果区样式随组件拆分
+
+**完成任务**：
+1. 将结果区全局样式（规则分布/失败详情/重试导出/移动端导出）迁入 `ResultPanel` 的 scoped 样式
+2. App.vue 974 → 671 行
+3. 响应式媒体查询同步拆分
+
+**验证**：前端 6 tests passed、构建成功；后端 55 passed
+
+详细文档：[SESSION_28](docs/sessions/SESSION_28_RESULT_STYLES_SPLIT.md)
+
 ---
 
-文档版本：v2.2
+文档版本：v2.3
 最后更新：2026-10-18
