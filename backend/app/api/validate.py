@@ -474,7 +474,13 @@ async def get_validation_progress(session_id: str):
             elapsed = time.time() - session.start_time if session.start_time > 0 else 0
             estimated_remaining = 0
             if session.processed > 0 and session.processed < session.total:
-                avg_time = elapsed / session.processed
+                # 早期样本过少时（如刚完成 1 条），直接按 processed 外推会得到
+                # "剩余 200 分钟"这类离谱值；用并发数校正分母。
+                effective_processed = max(
+                    session.processed,
+                    min(session.current_concurrency, session.total),
+                )
+                avg_time = elapsed / effective_processed
                 estimated_remaining = (session.total - session.processed) * avg_time
 
             progress_data = {

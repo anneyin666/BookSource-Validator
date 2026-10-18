@@ -7,7 +7,7 @@ const API_BASE = '/api'
  * 健康检查
  */
 export async function healthCheck() {
-  const response = await axios.get(`${API_BASE}/health`)
+  const response = await axios.get(`${API_BASE}/health`, { timeout: 5000 })
   return response.data
 }
 

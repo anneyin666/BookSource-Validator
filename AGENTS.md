@@ -600,7 +600,18 @@ npm run preview
 
 详细文档：[SESSION_31](docs/sessions/SESSION_31_DEAD_SOURCE_TIMEOUT_FIX.md)
 
+### 会话 32 - 2026-10-18
+
+**主题**：早期预估修正与后端版本检查
+
+**完成任务**：
+1. 预估剩余时间分母按并发数校正，消除"剩余 200 分钟"的离谱值
+2. 页面加载调用 `/api/health`，旧后端（无 turbo）时提示更新并重启
+3. 后端 59 passed，前端构建成功
+
+详细文档：[SESSION_32](docs/sessions/SESSION_32_ETA_AND_BACKEND_CHECK.md)
+
 ---
 
-文档版本：v2.6
+文档版本：v2.7
 最后更新：2026-10-18

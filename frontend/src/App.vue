@@ -215,7 +215,7 @@ import { useFailedRetry } from './composables/useFailedRetry.js'
 import { useBatchProcess } from './composables/useBatchProcess.js'
 import { useSingleProcess } from './composables/useSingleProcess.js'
 import { useSearchValidation } from './composables/useSearchValidation.js'
-import { cancelValidation, pauseValidation, resumeValidation } from './api/sources.js'
+import { cancelValidation, healthCheck, pauseValidation, resumeValidation } from './api/sources.js'
 import { downloadJson, formatDate, openExternalUrl } from './utils/download.js'
 import { useSSEValidation } from './composables/useSSEValidation.js'
 import { ref, onMounted, watch, onUnmounted } from 'vue'
@@ -385,6 +385,16 @@ onMounted(() => {
 
   // 全局粘贴事件监听
   document.addEventListener('paste', handleGlobalPaste)
+
+  // 后端版本检查：旧后端不支持 turbo，极速与最新修复不会生效
+  healthCheck()
+    .then((health) => {
+      const presets = health?.presets
+      if (!Array.isArray(presets) || !presets.includes('turbo')) {
+        showWarning('后端版本较旧：极速预设与最新修复未生效，请更新代码并重启后端')
+      }
+    })
+    .catch(() => {})
 })
 
 // 清理 SSE 连接和全局监听
