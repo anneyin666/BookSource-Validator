@@ -136,18 +136,23 @@ def test_healthy_windows_restore_two_concurrency_at_a_time():
 
 
 def test_timeout_is_capped_at_base_timeout_plus_ten():
-    """Dynamic timeout must remain bounded for dead sources."""
+    """Slow successful samples may raise timeout, but it stays capped."""
     controller = build_controller()
 
-    record_window(
-        controller,
-        count=96,
-        duration=39,
-        is_valid=False,
-        reason="超时",
-    )
+    for _ in range(6):
+        record_window(controller, count=8, duration=39, is_valid=False, reason="超时")
+        record_window(controller, count=8, duration=29, is_valid=True, reason="")
 
     assert controller.current_timeout == 40
+
+
+def test_all_timeout_window_does_not_raise_timeout():
+    """Dead-source-only windows must not inflate the timeout."""
+    controller = build_controller()
+
+    record_window(controller, count=96, duration=29, is_valid=False, reason="超时")
+
+    assert controller.current_timeout == 30
 
 
 def test_disabled_smart_mode_never_changes_runtime_options():

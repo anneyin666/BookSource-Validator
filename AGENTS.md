@@ -587,7 +587,20 @@ npm run preview
 
 详细文档：[SESSION_30](docs/sessions/SESSION_30_VERSION_MISMATCH_GUARD.md)
 
+### 会话 31 - 2026-10-18
+
+**主题**：死源超时放大修复
+
+**完成任务**：
+1. HEAD 超时/连接失败不再回退 GET（仅 HEAD 有响应但状态不可用时兜底），死源单次尝试耗时减半
+2. 智能策略仅在存在"接近超时的成功样本"时才提高超时，全超时窗口不再 25→40
+3. 新增 2 个回归测试并更新超时上限测试
+
+**验证**：后端 57 → 59 passed；实测 laitudu.com 本身正常（0.94s）
+
+详细文档：[SESSION_31](docs/sessions/SESSION_31_DEAD_SOURCE_TIMEOUT_FIX.md)
+
 ---
 
-文档版本：v2.5
+文档版本：v2.6
 最后更新：2026-10-18

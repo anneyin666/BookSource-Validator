@@ -291,7 +291,14 @@ class AdaptiveValidationController:
             )
             adjustment_reasons.append("healthy")
 
-        if timeout_rate >= 0.35:
+        # 只有出现"接近超时的成功样本"时才提高超时；
+        # 全是超时失败通常意味着死源，抬高超时只会让尾部更慢。
+        slow_success = any(
+            sample.is_valid
+            and sample.duration >= self.current_timeout * 0.7
+            for sample in samples
+        )
+        if timeout_rate >= 0.35 and slow_success:
             self.current_timeout = min(
                 self.max_timeout,
                 self.current_timeout + 5,

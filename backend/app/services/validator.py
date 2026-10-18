@@ -103,6 +103,13 @@ class ValidatorService:
                     return True, "403-ignored"
                 if 200 <= response.status_code < 400:
                     return True, ""
+            except httpx.ConnectTimeout:
+                # 死源/黑洞地址：GET 兜底只会再等满一个超时，直接判失败
+                return False, "连接超时"
+            except httpx.TimeoutException:
+                return False, "超时"
+            except httpx.ConnectError:
+                return False, "连接失败"
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 403:
                     return True, "403-ignored"
