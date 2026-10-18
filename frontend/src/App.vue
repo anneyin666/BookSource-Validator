@@ -319,8 +319,11 @@ import SearchValidator from './components/SearchValidator.vue'
 import FailedSources from './components/FailedSources.vue'
 import { useSources } from './composables/useSources.js'
 import { useToast } from './composables/useToast.js'
-import { parseFile, parseUrl, startValidation, startValidationFromData, getProgressEventSource, getSearchProgressEventSource, getValidationResult, cancelValidation, pauseValidation, resumeValidation, startBatchFilesValidation, startBatchUrlsValidation, parseBatchFiles, parseBatchUrls, startSearchValidation, startSearchValidationFromData, createBookSourceExport } from './api/sources.js'
-import { downloadJson, formatDate, buildAbsoluteUrl, buildLegadoImportUrl, openExternalUrl } from './utils/download.js'
+import { useLegadoExport } from './composables/useLegadoExport.js'
+import { useFailedRetry } from './composables/useFailedRetry.js'
+import { parseFile, parseUrl, startValidation, startValidationFromData, getProgressEventSource, getSearchProgressEventSource, cancelValidation, pauseValidation, resumeValidation, startBatchFilesValidation, startBatchUrlsValidation, parseBatchFiles, parseBatchUrls, startSearchValidation, startSearchValidationFromData } from './api/sources.js'
+import { downloadJson, formatDate, openExternalUrl } from './utils/download.js'
+import { buildValidationResultData, fetchValidationResult } from './utils/validationResult.js'
 import { useSSEValidation } from './composables/useSSEValidation.js'
 import { ref, computed, onMounted, watch, onUnmounted } from 'vue'
 
@@ -353,20 +356,27 @@ const urlInput = ref('')
 const processMode = ref('single')  // 'single' 或 'batch'
 const batchProcessorRef = ref(null)
 const isMobileBrowser = ref(false)
-const legadoExport = ref(createEmptyLegadoExport())
+
+// 导出到阅读 App（临时链接生成/缓存/过期提示）
+const {
+  legadoExport,
+  legadoExportExpireText,
+  reset: resetLegadoExport,
+  getCached: getCachedLegadoExport,
+  ensureReady: ensureLegadoExportReady
+} = useLegadoExport({
+  getSources: () => state.sourceData?.dedupedSources || [],
+  getValidCount: () => state.sourceData?.validCount || 0,
+  showError,
+  showWarning
+})
+
+// 失败重试纯逻辑（筛选/归一化/结果合并）
+const { collectFailedSources, mergeRetryResultData } = useFailedRetry()
 
 // 在线解析数据（用于支持深度校验）
 const urlSourceData = ref(null)
 const hasUrlData = computed(() => !!urlSourceData.value)
-const exportSourceFilename = computed(() => `阅读书源_去重有效_${formatDate(new Date())}.json`)
-const legadoExportExpireText = computed(() => {
-  if (!legadoExport.value.expiresAt) return ''
-
-  const remainingSeconds = Math.max(0, legadoExport.value.expiresAt - Math.floor(Date.now() / 1000))
-  if (remainingSeconds <= 0) return '临时链接已过期'
-  if (remainingSeconds > 60) return `约 ${Math.ceil(remainingSeconds / 60)} 分钟后失效`
-  return `约 ${remainingSeconds} 秒后失效`
-})
 
 // SSE 相关
 const sessionId = ref(null)
@@ -388,43 +398,6 @@ const {
   onDisconnect: (label) => showWarning(`${label}连接暂时中断，正在自动恢复，服务器仍在校验`),
   onReconnect: (label) => showSuccess(`${label}连接已恢复`)
 })
-
-// 拉取完整校验结果（弱网下与 SSE 分离，失败自动重试一次）
-async function fetchValidationResult(sessionIdValue) {
-  let lastError = null
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const result = await getValidationResult(sessionIdValue)
-      if (result.code !== 200) {
-        throw new Error(result.message || '获取校验结果失败')
-      }
-      return result.data
-    } catch (err) {
-      lastError = err
-      if (attempt === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 800))
-      }
-    }
-  }
-  throw lastError || new Error('获取校验结果失败')
-}
-
-// 组装校验结果数据（结果接口数据 + 会话基础统计）
-function buildValidationResultData(base, data, extras = {}) {
-  return {
-    total: base.total,
-    dedupCount: base.dedupCount,
-    duplicates: base.duplicates,
-    duplicateUrls: [],
-    formatInvalid: base.formatInvalid,
-    deepInvalid: data.invalidCount,
-    validCount: data.validCount,
-    dedupedSources: data.validSources || [],
-    failedGroups: data.failedGroups || [],
-    failedCategories: data.failedCategories || {},
-    ...extras
-  }
-}
 
 // 从localStorage读取设置
 onMounted(() => {
@@ -463,84 +436,10 @@ watch(() => state.sourceData?.dedupedSources, (sources) => {
   }
 })
 
-function createEmptyLegadoExport() {
-  return {
-    ready: false,
-    loading: false,
-    downloadUrl: '',
-    legadoUrl: '',
-    expiresAt: 0,
-    sourceCount: 0
-  }
-}
-
-function resetLegadoExport() {
-  legadoExport.value = createEmptyLegadoExport()
-}
-
 function applyValidationPreset(preset) {
   if (preset.value === 'custom') return
   concurrency.value = preset.concurrency
   timeout.value = preset.timeout
-}
-
-function getCachedLegadoExport() {
-  const current = legadoExport.value
-  const currentValidCount = state.sourceData?.validCount || 0
-  const isFresh = (
-    current.ready &&
-    current.downloadUrl &&
-    current.legadoUrl &&
-    current.sourceCount === currentValidCount &&
-    current.expiresAt > Math.floor(Date.now() / 1000) + 30
-  )
-
-  return isFresh ? current : null
-}
-
-async function ensureLegadoExportReady({ silent = false } = {}) {
-  const sources = state.sourceData?.dedupedSources || []
-  if (!Array.isArray(sources) || sources.length === 0) {
-    if (!silent) {
-      showWarning('没有可导出的有效书源')
-    }
-    return null
-  }
-
-  const cached = getCachedLegadoExport()
-  if (cached) {
-    return cached
-  }
-
-  legadoExport.value = {
-    ...createEmptyLegadoExport(),
-    loading: true,
-    sourceCount: sources.length
-  }
-
-  try {
-    const result = await createBookSourceExport(sources, exportSourceFilename.value)
-    if (result.code !== 200) {
-      throw new Error(result.message || '生成导出链接失败')
-    }
-
-    const downloadUrl = buildAbsoluteUrl(result.data.path)
-    legadoExport.value = {
-      ready: true,
-      loading: false,
-      downloadUrl,
-      legadoUrl: buildLegadoImportUrl(downloadUrl),
-      expiresAt: result.data.expiresAt,
-      sourceCount: sources.length
-    }
-    return legadoExport.value
-  } catch (err) {
-    resetLegadoExport()
-    if (!silent) {
-      showError(err.message || '生成导出链接失败')
-    }
-    return null
-  }
 }
 
 // 全局粘贴事件处理
@@ -1085,84 +984,16 @@ async function handleExportToLegado() {
   showInfo('已尝试唤起阅读 App；若未自动跳转，请确认已安装阅读，并尝试打开下方临时链接。')
 }
 
-function isNetworkRetryReason(reason) {
-  const keywords = ['超时', '连接失败', '连接超时', '读取错误', '写入错误', '读取超时', '写入超时', '网络错误', 'SSL', '服务器断开', '协议错误']
-  return keywords.some((keyword) => String(reason || '').includes(keyword))
-}
-
-// 优先使用后端返回的失败分类；旧数据回退到关键词匹配
-function isRetryableGroup(group) {
-  if (group?.category) {
-    return group.category === 'fixable'
-  }
-  return isNetworkRetryReason(group?.reason)
-}
-
-function normalizeFailedSource(source) {
-  const bookSourceUrl = source.bookSourceUrl || source.url || ''
-  if (!bookSourceUrl) return null
-  return {
-    ...source,
-    bookSourceUrl,
-    bookSourceName: source.bookSourceName || source.name || '未命名'
-  }
-}
-
-function collectFailedSources(onlyNetwork) {
-  const groups = state.sourceData?.failedGroups || []
-  const retrySources = []
-  const skippedGroups = []
-
-  for (const group of groups) {
-    const shouldRetry = !onlyNetwork || isRetryableGroup(group)
-    if (!shouldRetry) {
-      skippedGroups.push(group)
-      continue
-    }
-
-    for (const source of group.sources || []) {
-      const normalized = normalizeFailedSource(source)
-      if (normalized) retrySources.push(normalized)
-    }
-  }
-
-  return { retrySources, skippedGroups }
-}
-
 function mergeRetryResult(data, skippedGroups = []) {
   const previous = retryContext.value?.previous
   if (!previous) return
 
-  const sourceMap = new Map()
-  for (const source of previous.dedupedSources || []) {
-    const url = source.bookSourceUrl || source.url
-    if (url) sourceMap.set(url, source)
-  }
-  for (const source of data.validSources || []) {
-    const url = source.bookSourceUrl || source.url
-    if (url) sourceMap.set(url, source)
-  }
-
-  const failedGroups = [
-    ...(data.failedGroups || []),
-    ...skippedGroups
-  ].filter((group) => group.count > 0)
-  const failedCount = failedGroups.reduce((sum, group) => sum + (group.count || 0), 0)
-  const validSources = Array.from(sourceMap.values())
-
-  setSourceData({
-    ...previous,
-    deepInvalid: failedCount,
-    validCount: validSources.length,
-    dedupedSources: validSources,
-    failedGroups,
-    failedCategories: data.failedCategories || previous.failedCategories || {},
-    ruleTypeStats: data.ruleTypeStats || previous.ruleTypeStats || null
-  })
+  const merged = mergeRetryResultData(previous, data, skippedGroups)
+  if (merged) setSourceData(merged)
 }
 
 async function handleRetryFailed(onlyNetwork) {
-  const { retrySources, skippedGroups } = collectFailedSources(onlyNetwork)
+  const { retrySources, skippedGroups } = collectFailedSources(state.sourceData, onlyNetwork)
   if (retrySources.length === 0) {
     showWarning(onlyNetwork ? '没有可重试的网络/超时失败项' : '没有可重试的失败项')
     return

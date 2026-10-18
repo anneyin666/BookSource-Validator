@@ -475,7 +475,22 @@ npm run preview
 
 详细文档：[SESSION_22](docs/sessions/SESSION_22_ROUTE_SPLIT.md)
 
+### 会话 23 - 2026-10-18
+
+**主题**：App.vue 拆分（P2 第三批）
+
+**完成任务**：
+1. 新增 `composables/useLegadoExport.js`（临时导出链接生成/缓存/过期提示）
+2. 新增 `composables/useFailedRetry.js`（失败分组筛选、书源归一化、重试结果合并）
+3. 新增 `utils/validationResult.js`（结果组装与结果接口拉取）
+4. App.vue 1742 → 1573 行；移除约 170 行内联逻辑
+5. 新增 `frontend/tests/failedRetry.test.js`（4 个用例），前端测试 2 → 6 passed
+
+**验证**：前端构建成功，`npm test` 6 passed
+
+详细文档：[SESSION_23](docs/sessions/SESSION_23_APP_VUE_SPLIT.md)
+
 ---
 
-文档版本：v1.7
+文档版本：v1.8
 最后更新：2026-10-18
