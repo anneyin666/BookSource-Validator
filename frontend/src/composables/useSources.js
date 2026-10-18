@@ -1,49 +1,51 @@
 // 书源数据处理组合式函数
 import { reactive, computed } from 'vue'
 
+// 模块级单例状态：多个组件调用 useSources() 共享同一份状态
+const state = reactive({
+  // 文件状态
+  file: null,
+  fileName: null,
+
+  // 加载状态
+  loading: false,
+  validating: false,
+
+  // 消息状态
+  error: null,
+  success: null,
+  warning: null,
+
+  // 数据状态
+  sourceData: null
+})
+
+// 计算属性
+const hasFile = computed(() => !!state.file)
+
+const hasValidSources = computed(() =>
+  state.sourceData && state.sourceData.validCount > 0
+)
+
+const stats = computed(() => {
+  if (!state.sourceData) return null
+  return {
+    total: state.sourceData.total,
+    dedupCount: state.sourceData.dedupCount,
+    duplicates: state.sourceData.duplicates || 0,
+    duplicateUrls: state.sourceData.duplicateUrls || [],
+    formatInvalid: state.sourceData.formatInvalid,
+    deepInvalid: state.sourceData.deepInvalid,
+    validCount: state.sourceData.validCount,
+    // 规则类型统计（搜索校验模式）
+    ruleTypeStats: state.sourceData.ruleTypeStats || null
+  }
+})
+
 /**
- * 使用书源状态管理
+ * 使用书源状态管理（单例：任意组件共享同一状态）
  */
 export function useSources() {
-  const state = reactive({
-    // 文件状态
-    file: null,
-    fileName: null,
-
-    // 加载状态
-    loading: false,
-    validating: false,
-
-    // 消息状态
-    error: null,
-    success: null,
-    warning: null,
-
-    // 数据状态
-    sourceData: null
-  })
-
-  // 计算属性
-  const hasFile = computed(() => !!state.file)
-
-  const hasValidSources = computed(() =>
-    state.sourceData && state.sourceData.validCount > 0
-  )
-
-  const stats = computed(() => {
-    if (!state.sourceData) return null
-    return {
-      total: state.sourceData.total,
-      dedupCount: state.sourceData.dedupCount,
-      duplicates: state.sourceData.duplicates || 0,
-      duplicateUrls: state.sourceData.duplicateUrls || [],
-      formatInvalid: state.sourceData.formatInvalid,
-      deepInvalid: state.sourceData.deepInvalid,
-      validCount: state.sourceData.validCount,
-      // 规则类型统计（搜索校验模式）
-      ruleTypeStats: state.sourceData.ruleTypeStats || null
-    }
-  })
 
   // 方法
   function setFile(file) {

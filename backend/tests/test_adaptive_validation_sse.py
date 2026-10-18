@@ -172,7 +172,14 @@ def test_cancel_while_paused_keeps_requests_completed_during_pause(
 
     assert not stream_thread.is_alive()
     assert stream_result["validCount"] == 1
-    assert stream_result["validSources"][0]["bookSourceName"] == "one"
+    # 终态 SSE 消息只保留统计字段，避免弱网下超长消息被掐断
+    assert "validSources" not in stream_result
+    assert stream_result["resultReady"] is True
+
+    result_response = control_client.get(f"/api/validate/result/{session_id}")
+    result_data = result_response.json()["data"]
+    assert result_data["validCount"] == 1
+    assert result_data["validSources"][0]["bookSourceName"] == "one"
 
 
 def test_completed_sse_result_can_be_replayed_without_rerunning(monkeypatch):

@@ -155,6 +155,45 @@ def build_failed_groups(failed_sources: dict) -> list:
     return failed_groups
 
 
+def build_strategy_payload(session) -> dict:
+    """构造校验策略快照，供 SSE 进度与结果接口复用。"""
+    return {
+        "mode": session.validation_mode,
+        "smartEnabled": session.smart_enabled,
+        "phase": session.validation_phase,
+        "currentConcurrency": session.current_concurrency,
+        "currentTimeout": session.current_timeout,
+    }
+
+
+def build_session_result(session) -> dict:
+    """构造完整校验结果（供结果接口使用，含书源明细）。"""
+    valid_sources = session.valid_sources
+    failed_sources = session.failed_sources
+    failed_groups = build_failed_groups(failed_sources)
+    invalid_count = sum(len(items) for items in failed_sources.values())
+
+    result = {
+        "status": session.status,
+        "total": session.total,
+        "dedupCount": session.dedup_count if session.dedup_count else session.total,
+        "duplicates": session.duplicates,
+        "formatInvalid": session.format_invalid,
+        "totalOriginal": session.total_original if session.total_original else session.total,
+        "validCount": len(valid_sources),
+        "invalidCount": invalid_count,
+        "validSources": valid_sources,
+        "failedGroups": failed_groups,
+        "failedCategories": categorize_failed_sources(failed_groups),
+        "fileStats": session.file_stats,
+        "urlStats": session.url_stats,
+        "strategy": build_strategy_payload(session),
+    }
+    if session.is_search:
+        result["ruleTypeStats"] = calculate_rule_type_stats(valid_sources, failed_sources)
+    return result
+
+
 def build_empty_source_data(*, file_stats=None, url_stats=None) -> SourceData:
     """构造空结果，避免错误分支触发响应模型校验失败。"""
     return SourceData(
@@ -259,7 +298,7 @@ async def parse_url(request: UrlParseRequest):
     if not request.url.startswith(('http://', 'https://')):
         return ParseResponse(code=400, message="仅支持 HTTP/HTTPS 协议")
 
-    is_safe, error_message = UrlSecurityService.is_safe_remote_url(request.url)
+    is_safe, error_message = await UrlSecurityService.is_safe_remote_url(request.url)
     if not is_safe:
         return ParseResponse(code=400, message=error_message)
 
@@ -586,6 +625,9 @@ async def get_validation_progress(session_id: str):
             yield f"data: {json.dumps({'error': 'Session not found'})}\n\n"
             return
 
+        # 告知浏览器断线后 2 秒内重连，提升移动端弱网恢复速度
+        yield "retry: 2000\n\n"
+
         # 存储校验任务，用于取消
         validation_tasks = []
 
@@ -832,15 +874,14 @@ async def get_validation_progress(session_id: str):
             # 检查是否完成（直接读取 session.status）
             if session.status in ["completed", "cancelled", "error"]:
                 if session.status == "completed":
-                    # 先获取数据，再删除会话
                     valid_sources = session.valid_sources
                     failed_sources = session.failed_sources
 
-                    failed_groups = build_failed_groups(failed_sources)
-
-                    # 设置分组
+                    # 设置分组（结果接口返回的数据已带分组）
                     ValidatorService.set_source_group(valid_sources, len(valid_sources))
 
+                    # 只发送统计信息：完整结果由 /api/validate/result/{session_id} 单独拉取，
+                    # 避免弱网/低带宽下单条 SSE 消息携带数 MB 数据被代理或移动网络掐断。
                     result_data = {
                         "status": "completed",
                         "processed": session.total,
@@ -849,31 +890,21 @@ async def get_validation_progress(session_id: str):
                         "invalid": sum(len(v) for v in failed_sources.values()),
                         "validCount": len(valid_sources),
                         "invalidCount": sum(len(v) for v in failed_sources.values()),
-                        "validSources": valid_sources,
-                        "failedGroups": failed_groups,
-                        "failedCategories": categorize_failed_sources(failed_groups),
-                        # 批量处理额外信息
-                        "fileStats": session.file_stats,
-                        "urlStats": session.url_stats,
-                        "dedupCount": session.dedup_count if session.dedup_count else session.total,
-                        "duplicates": session.duplicates,
-                        "formatInvalid": session.format_invalid,
-                        "totalOriginal": session.total_original if session.total_original else session.total,
-                        "strategy": {
-                            "mode": session.validation_mode,
-                            "smartEnabled": session.smart_enabled,
-                            "phase": session.validation_phase,
-                            "currentConcurrency": session.current_concurrency,
-                            "currentTimeout": session.current_timeout,
-                        },
+                        "resultReady": True,
+                        "resultUrl": f"/api/validate/result/{session_id}",
+                        "strategy": build_strategy_payload(session),
                     }
-                    logger.info(f"SSE完成消息: validCount={len(valid_sources)}, invalidCount={sum(len(v) for v in failed_sources.values())}, validSources数量={len(valid_sources)}, failedGroups数量={len(failed_groups)}")
+                    logger.info(
+                        "SSE完成消息: validCount=%s invalidCount=%s result_url=%s",
+                        result_data["validCount"],
+                        result_data["invalidCount"],
+                        result_data["resultUrl"],
+                    )
                     yield f"data: {json.dumps(result_data, ensure_ascii=False)}\n\n"
 
                 elif session.status == "cancelled":
                     valid_sources = session.valid_sources
                     failed_sources = session.failed_sources
-                    failed_groups = build_failed_groups(failed_sources)
                     ValidatorService.set_source_group(valid_sources, len(valid_sources))
                     result_data = {
                         "status": "cancelled",
@@ -883,23 +914,10 @@ async def get_validation_progress(session_id: str):
                         "invalid": sum(len(v) for v in failed_sources.values()),
                         "validCount": len(valid_sources),
                         "invalidCount": sum(len(v) for v in failed_sources.values()),
-                        "validSources": valid_sources,
-                        "failedGroups": failed_groups,
-                        "failedCategories": categorize_failed_sources(failed_groups),
                         "partial": True,
-                        "fileStats": session.file_stats,
-                        "urlStats": session.url_stats,
-                        "dedupCount": session.dedup_count if session.dedup_count else session.total,
-                        "duplicates": session.duplicates,
-                        "formatInvalid": session.format_invalid,
-                        "totalOriginal": session.total_original if session.total_original else session.total,
-                        "strategy": {
-                            "mode": session.validation_mode,
-                            "smartEnabled": session.smart_enabled,
-                            "phase": session.validation_phase,
-                            "currentConcurrency": session.current_concurrency,
-                            "currentTimeout": session.current_timeout,
-                        },
+                        "resultReady": True,
+                        "resultUrl": f"/api/validate/result/{session_id}",
+                        "strategy": build_strategy_payload(session),
                     }
                     yield f"data: {json.dumps(result_data, ensure_ascii=False)}\n\n"
 
@@ -972,6 +990,22 @@ async def resume_validation(session_id: str = Form(...)):
     await session_manager.resume_session(session_id)
     logger.info("校验恢复请求: session_id=%s", session_id)
     return {"code": 200, "message": "已恢复"}
+
+
+@router.get("/validate/result/{session_id}")
+async def get_validation_result(session_id: str):
+    """获取校验完整结果。
+
+    弱网/低带宽环境下，SSE 完成消息只携带统计数字，
+    前端收到完成消息后再通过此接口拉取书源明细（支持 gzip 压缩与重试）。
+    """
+    session = await session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在或已过期")
+    if session.status not in ("completed", "cancelled"):
+        return {"code": 409, "message": "校验尚未完成"}
+
+    return {"code": 200, "data": build_session_result(session)}
 
 
 # ===================== 批量处理接口 =====================
@@ -1121,7 +1155,7 @@ async def start_batch_urls_validation(request: dict):
                 url_stats.append({"url": url, "valid": False, "error": "无效URL"})
                 continue
 
-            is_safe, error_message = UrlSecurityService.is_safe_remote_url(url)
+            is_safe, error_message = await UrlSecurityService.is_safe_remote_url(url)
             if not is_safe:
                 url_stats.append({"url": url, "valid": False, "error": error_message})
                 continue
@@ -1319,7 +1353,7 @@ async def parse_batch_urls(request: dict):
                 url_stats.append({"url": url, "valid": False, "error": "无效URL"})
                 continue
 
-            is_safe, error_message = UrlSecurityService.is_safe_remote_url(url)
+            is_safe, error_message = await UrlSecurityService.is_safe_remote_url(url)
             if not is_safe:
                 url_stats.append({"url": url, "valid": False, "error": error_message})
                 continue
@@ -1457,6 +1491,7 @@ async def start_search_validation(
     async with session_manager._lock:
         session = session_manager._sessions.get(session_id)
         if session:
+            session.is_search = True
             session.search_keyword = keyword
             session.validate_type = validate_type
             session.total_original = len(sources)
@@ -1506,6 +1541,7 @@ async def start_search_validation_from_data(request: dict):
     async with session_manager._lock:
         session = session_manager._sessions.get(session_id)
         if session:
+            session.is_search = True
             session.search_keyword = keyword
             session.validate_type = validate_type
             session.total_original = len(sources)
@@ -1547,6 +1583,9 @@ async def get_search_validation_progress(session_id: str):
             logger.error(f"Session not found: {session_id}")
             yield f"data: {json.dumps({'error': 'Session not found'})}\n\n"
             return
+
+        # 告知浏览器断线后 2 秒内重连，提升移动端弱网恢复速度
+        yield "retry: 2000\n\n"
 
         logger.info(f"搜索校验开始: session_id={session_id}, total={session.total}")
 
@@ -1832,8 +1871,7 @@ async def get_search_validation_progress(session_id: str):
                     valid_sources = session.valid_sources
                     failed_sources = session.failed_sources
 
-                    failed_groups = build_failed_groups(failed_sources)
-
+                    # 只发送统计信息，完整结果（含规则类型分布）由结果接口拉取
                     result_data = {
                         "status": "completed",
                         "processed": session.total,
@@ -1842,24 +1880,15 @@ async def get_search_validation_progress(session_id: str):
                         "invalid": sum(len(v) for v in failed_sources.values()),
                         "validCount": len(valid_sources),
                         "invalidCount": sum(len(v) for v in failed_sources.values()),
-                        "validSources": valid_sources,
-                        "failedGroups": failed_groups,
-                        "failedCategories": categorize_failed_sources(failed_groups),
-                        # 规则类型统计
-                        "ruleTypeStats": calculate_rule_type_stats(valid_sources, failed_sources),
-                        "strategy": {
-                            "mode": session.validation_mode,
-                            "smartEnabled": session.smart_enabled,
-                            "currentConcurrency": session.current_concurrency,
-                            "currentTimeout": session.current_timeout,
-                        },
+                        "resultReady": True,
+                        "resultUrl": f"/api/validate/result/{session_id}",
+                        "strategy": build_strategy_payload(session),
                     }
                     yield f"data: {json.dumps(result_data, ensure_ascii=False)}\n\n"
 
                 elif session.status == "cancelled":
                     valid_sources = session.valid_sources
                     failed_sources = session.failed_sources
-                    failed_groups = build_failed_groups(failed_sources)
                     result_data = {
                         "status": "cancelled",
                         "processed": session.processed,
@@ -1868,11 +1897,10 @@ async def get_search_validation_progress(session_id: str):
                         "invalid": sum(len(v) for v in failed_sources.values()),
                         "validCount": len(valid_sources),
                         "invalidCount": sum(len(v) for v in failed_sources.values()),
-                        "validSources": valid_sources,
-                        "failedGroups": failed_groups,
-                        "failedCategories": categorize_failed_sources(failed_groups),
-                        "ruleTypeStats": calculate_rule_type_stats(valid_sources, failed_sources),
                         "partial": True,
+                        "resultReady": True,
+                        "resultUrl": f"/api/validate/result/{session_id}",
+                        "strategy": build_strategy_payload(session),
                     }
                     yield f"data: {json.dumps(result_data, ensure_ascii=False)}\n\n"
 

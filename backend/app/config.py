@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     REQUEST_TIMEOUT: int = 30
     EXPORT_TTL_SECONDS: int = 15 * 60  # 导出临时链接有效期（秒）
 
+    # 内存保护（低配服务器可通过环境变量下调）
+    MAX_SESSIONS: int = 20  # 同时保留的校验会话上限
+    MAX_EXPORTS: int = 50  # 临时导出条目上限
+    SESSION_RETENTION_SECONDS: int = 30 * 60  # 终止会话结果保留时长（秒）
+
     # 深度校验超时选项（秒）
     TIMEOUT_OPTIONS: List[int] = [15, 30, 45, 60]
     VALIDATE_TIMEOUT: int = 30  # 默认超时

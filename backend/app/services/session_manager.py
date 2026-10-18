@@ -6,8 +6,12 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
 
 
+from app.config import settings
+
+
 TERMINAL_STATUSES = {"completed", "cancelled", "error"}
-DEFAULT_RETENTION_SECONDS = 30 * 60
+DEFAULT_RETENTION_SECONDS = settings.SESSION_RETENTION_SECONDS
+DEFAULT_MAX_SESSIONS = settings.MAX_SESSIONS
 
 
 @dataclass
@@ -45,6 +49,7 @@ class ValidationSession:
     format_invalid: int = 0
     total_original: int = 0
     # 搜索校验额外信息
+    is_search: bool = False
     search_keyword: str = ""
     validate_type: str = "search"  # 'search' 或 'explore'
     # 时间统计
@@ -64,10 +69,12 @@ class SessionManager:
     def __init__(
         self,
         retention_seconds: int = DEFAULT_RETENTION_SECONDS,
+        max_sessions: int = DEFAULT_MAX_SESSIONS,
     ):
         self._sessions: Dict[str, ValidationSession] = {}
         self._lock = asyncio.Lock()
         self._retention_seconds = retention_seconds
+        self._max_sessions = max_sessions
 
     def _cleanup_expired_locked(self, now: float) -> None:
         """Remove terminal sessions whose reconnect window has elapsed."""
@@ -81,6 +88,20 @@ class SessionManager:
         for session_id in expired_ids:
             self._sessions.pop(session_id, None)
 
+    def _evict_overflow_locked(self) -> None:
+        """会话数达到上限时淘汰旧会话，防止内存被无限占用。
+
+        优先淘汰已终止的会话（按进入顺序），全部都在运行时才淘汰最早的会话。
+        """
+        while len(self._sessions) >= self._max_sessions:
+            terminal_ids = [
+                session_id
+                for session_id, session in self._sessions.items()
+                if session.status in TERMINAL_STATUSES
+            ]
+            victim = terminal_ids[0] if terminal_ids else next(iter(self._sessions))
+            self._sessions.pop(victim, None)
+
     async def create_session(
         self,
         sources: List[dict],
@@ -91,9 +112,8 @@ class SessionManager:
         max_retries: int = 2,
     ) -> str:
         """创建新会话"""
-        session_id = str(uuid.uuid4())[:8]
         session = ValidationSession(
-            session_id=session_id,
+            session_id="",
             total=len(sources),
             sources=sources,
             concurrency=concurrency,
@@ -107,6 +127,12 @@ class SessionManager:
         )
         async with self._lock:
             self._cleanup_expired_locked(time.time())
+            self._evict_overflow_locked()
+            # 会话 ID 防碰撞（截断的 uuid 存在极小概率冲突）
+            session_id = str(uuid.uuid4())[:8]
+            while session_id in self._sessions:
+                session_id = str(uuid.uuid4())[:8]
+            session.session_id = session_id
             self._sessions[session_id] = session
         return session_id
 

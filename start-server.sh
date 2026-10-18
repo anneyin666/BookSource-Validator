@@ -10,15 +10,22 @@ echo "======================================"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# 检查前端是否已构建
-if [ ! -d "frontend/dist" ]; then
-    echo "[1/3] 前端未构建，开始构建..."
+# 检查前端是否需要构建（dist 不存在，或源码比构建产物新）
+NEED_BUILD=0
+if [ ! -f "frontend/dist/index.html" ]; then
+    NEED_BUILD=1
+elif [ -n "$(find frontend/src frontend/index.html frontend/package.json -newer frontend/dist/index.html -print -quit 2>/dev/null)" ]; then
+    NEED_BUILD=1
+fi
+
+if [ "$NEED_BUILD" = "1" ]; then
+    echo "[1/3] 前端未构建或源码有更新，开始构建..."
     cd frontend
     npm install
     npm run build
     cd ..
 else
-    echo "[1/3] 前端已构建，跳过"
+    echo "[1/3] 前端已是最新构建，跳过"
 fi
 
 # 检查后端依赖

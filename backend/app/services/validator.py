@@ -6,7 +6,9 @@ from typing import List, Tuple, Optional, Callable
 from datetime import datetime
 
 from app.config import settings
+from app.services.url_security import UrlSecurityService
 from app.services.validation_strategy import get_retry_delay
+from app.utils.url_utils import strip_chinese_suffix
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,10 @@ class ValidatorService:
             timeout = settings.VALIDATE_TIMEOUT
         if max_retries is None:
             max_retries = settings.MAX_RETRIES
+
+        # 轻量 SSRF 拦截：本地主机名与私网/回环字面量 IP 直接判无效
+        if not UrlSecurityService.is_safe_request_target(url):
+            return False, "不允许访问该地址"
 
         async def do_request(client: httpx.AsyncClient) -> Tuple[bool, str]:
             """执行请求，返回 (是否有效, 原因)"""
@@ -212,18 +218,7 @@ class ValidatorService:
     @staticmethod
     def clean_source_url(url: str) -> str:
         """Remove trailing Chinese notes that may be appended after a source URL."""
-        import re
-        chinese_match = re.search(r'[\u4e00-\u9fff]', url)
-        if not chinese_match:
-            return url
-
-        chinese_index = chinese_match.start()
-        slash_index = url.find('/', 8)
-        if slash_index != -1 and chinese_index > slash_index:
-            return url[:chinese_index]
-        if chinese_index > 8:
-            return url[:chinese_index]
-        return url
+        return strip_chinese_suffix(url)
 
     @staticmethod
     async def deep_validate(

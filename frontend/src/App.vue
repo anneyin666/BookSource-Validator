@@ -319,9 +319,9 @@ import SearchValidator from './components/SearchValidator.vue'
 import FailedSources from './components/FailedSources.vue'
 import { useSources } from './composables/useSources.js'
 import { useToast } from './composables/useToast.js'
-import { parseFile, parseUrl, startValidation, startValidationFromData, getProgressEventSource, getSearchProgressEventSource, cancelValidation, pauseValidation, resumeValidation, startBatchFilesValidation, startBatchUrlsValidation, parseBatchFiles, parseBatchUrls, startSearchValidation, startSearchValidationFromData, createBookSourceExport } from './api/sources.js'
+import { parseFile, parseUrl, startValidation, startValidationFromData, getProgressEventSource, getSearchProgressEventSource, getValidationResult, cancelValidation, pauseValidation, resumeValidation, startBatchFilesValidation, startBatchUrlsValidation, parseBatchFiles, parseBatchUrls, startSearchValidation, startSearchValidationFromData, createBookSourceExport } from './api/sources.js'
 import { downloadJson, formatDate, buildAbsoluteUrl, buildLegadoImportUrl, openExternalUrl } from './utils/download.js'
-import { bindEventSourceRecovery } from './utils/eventSourceRecovery.js'
+import { useSSEValidation } from './composables/useSSEValidation.js'
 import { ref, computed, onMounted, watch, onUnmounted } from 'vue'
 
 const {
@@ -369,7 +369,6 @@ const legadoExportExpireText = computed(() => {
 })
 
 // SSE 相关
-const progressData = ref(null)
 const sessionId = ref(null)
 const startResultData = ref(null)
 const retryContext = ref(null)
@@ -377,40 +376,58 @@ const lastSearchConfig = ref({
   validateType: 'search',
   keyword: '玄幻'
 })
-let eventSource = null
 
-function enableEventSourceRecovery(source, label = '校验') {
-  bindEventSourceRecovery(source, {
-    isActive: () => source === eventSource && state.validating,
-    onDisconnect: () => {
-      if (progressData.value) {
-        progressData.value = {
-          ...progressData.value,
-          status: 'reconnecting'
-        }
+// 统一的 SSE 校验订阅（含进度解析、断线恢复与强制重连看门狗）
+const {
+  progressData,
+  elapsedTime,
+  subscribe: subscribeValidation,
+  stop: stopValidation,
+  destroy: destroyValidation
+} = useSSEValidation({
+  onDisconnect: (label) => showWarning(`${label}连接暂时中断，正在自动恢复，服务器仍在校验`),
+  onReconnect: (label) => showSuccess(`${label}连接已恢复`)
+})
+
+// 拉取完整校验结果（弱网下与 SSE 分离，失败自动重试一次）
+async function fetchValidationResult(sessionIdValue) {
+  let lastError = null
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const result = await getValidationResult(sessionIdValue)
+      if (result.code !== 200) {
+        throw new Error(result.message || '获取校验结果失败')
       }
-      showWarning(`${label}连接暂时中断，正在自动恢复，服务器仍在校验`)
-    },
-    onReconnect: () => {
-      if (progressData.value?.status === 'reconnecting') {
-        progressData.value = {
-          ...progressData.value,
-          status: 'running'
-        }
+      return result.data
+    } catch (err) {
+      lastError = err
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 800))
       }
-      showSuccess(`${label}连接已恢复`)
     }
-  })
+  }
+  throw lastError || new Error('获取校验结果失败')
 }
 
-// 耗时计算
-const elapsedTime = ref(0)
-let timerInterval = null
+// 组装校验结果数据（结果接口数据 + 会话基础统计）
+function buildValidationResultData(base, data, extras = {}) {
+  return {
+    total: base.total,
+    dedupCount: base.dedupCount,
+    duplicates: base.duplicates,
+    duplicateUrls: [],
+    formatInvalid: base.formatInvalid,
+    deepInvalid: data.invalidCount,
+    validCount: data.validCount,
+    dedupedSources: data.validSources || [],
+    failedGroups: data.failedGroups || [],
+    failedCategories: data.failedCategories || {},
+    ...extras
+  }
+}
 
 // 从localStorage读取设置
 onMounted(() => {
-  console.log('=== App.vue 已挂载 (版本: 2026-03-13-v2) ===')
-  console.log('processMode:', processMode.value)
   isMobileBrowser.value = /android|iphone|ipad|ipod|mobile/i.test(window.navigator.userAgent)
 
   const savedConcurrency = localStorage.getItem('sourceTool_concurrency')
@@ -423,14 +440,9 @@ onMounted(() => {
   document.addEventListener('paste', handleGlobalPaste)
 })
 
-// 清理 SSE 连接和计时器
+// 清理 SSE 连接和全局监听
 onUnmounted(() => {
-  if (eventSource) {
-    eventSource.close()
-  }
-  if (timerInterval) {
-    clearInterval(timerInterval)
-  }
+  destroyValidation()
   document.removeEventListener('paste', handleGlobalPaste)
 })
 
@@ -578,13 +590,8 @@ function handleClear() {
 
 // 处理文件上传
 function handleFileUpload(file) {
-  console.log('=== handleFileUpload 被调用 ===')
-  console.log('file:', file)
-  console.log('file.name:', file?.name)
   setFile(file)
   urlSourceData.value = null
-  console.log('setFile 调用完成，state.file:', state.file)
-  console.log('hasFile:', hasFile.value)
 }
 
 // 处理 URL 获取
@@ -653,23 +660,6 @@ async function handleDedupFile() {
   }
 }
 
-// 开始计时
-function startTimer() {
-  elapsedTime.value = 0
-  if (timerInterval) clearInterval(timerInterval)
-  timerInterval = setInterval(() => {
-    elapsedTime.value++
-  }, 1000)
-}
-
-// 停止计时
-function stopTimer() {
-  if (timerInterval) {
-    clearInterval(timerInterval)
-    timerInterval = null
-  }
-}
-
 // 全部校验（SSE 模式）
 async function handleFullValidate() {
   if (state.file) {
@@ -702,102 +692,47 @@ async function handleFullValidateFile() {
     startResultData.value = startResult
     sessionId.value = startResult.sessionId
 
-    progressData.value = {
-      processed: 0,
-      total: startResult.deepTotal,
-      valid: 0,
-      invalid: 0,
-      current: '',
-      currentName: '',
-      estimatedRemaining: 0
-    }
-
-    startTimer()
-    eventSource = getProgressEventSource(sessionId.value)
-
-    eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-
-      if (data.error) {
-        stopTimer()
-        showError(data.error)
-        eventSource.close()
-        setValidating(false)
-        return
-      }
-
-      if (data.status === 'completed' && data.validCount !== undefined) {
-        stopTimer()
-        eventSource.close()
-        setValidating(false)
-
-        const startData = startResultData.value
-        const resultData = {
-          total: startData.total,
-          dedupCount: startData.dedupCount,
-          duplicates: startData.duplicates,
-          duplicateUrls: [],
-          formatInvalid: startData.formatInvalid,
-          deepInvalid: data.invalidCount,
-          validCount: data.validCount,
-          dedupedSources: data.validSources || [],
-          failedGroups: data.failedGroups || [],
-          failedCategories: data.failedCategories || {}
-        }
-
-        setSourceData(resultData)
-        const invalidTotal = startData.formatInvalid + (data.invalidCount || 0)
-        if (invalidTotal > 0) {
-          showSuccess(`校验完成，有效 ${data.validCount} 条，失效 ${invalidTotal} 条`)
-        } else {
-          showSuccess(`校验完成，全部有效，共 ${data.validCount} 条`)
-        }
-        return
-      }
-
-      if (data.status === 'cancelled') {
-        stopTimer()
-        eventSource.close()
-        setValidating(false)
-        if (data.validCount !== undefined) {
+    subscribeValidation({
+      label: '校验',
+      createSource: () => getProgressEventSource(sessionId.value),
+      initialProgress: { total: startResult.deepTotal },
+      onCompleted: async () => {
+        try {
+          const result = await fetchValidationResult(sessionId.value)
           const startData = startResultData.value
-          setSourceData({
-            total: startData.total,
-            dedupCount: startData.dedupCount,
-            duplicates: startData.duplicates,
-            duplicateUrls: [],
-            formatInvalid: startData.formatInvalid,
-            deepInvalid: data.invalidCount,
-            validCount: data.validCount,
-            dedupedSources: data.validSources || [],
-            failedGroups: data.failedGroups || [],
-            failedCategories: data.failedCategories || {}
-          })
-          showWarning(`校验已取消，已保留 ${data.validCount} 条有效结果`)
-        } else {
+          setSourceData(buildValidationResultData(startData, result))
+          const invalidTotal = (startData.formatInvalid || 0) + (result.invalidCount || 0)
+          if (invalidTotal > 0) {
+            showSuccess(`校验完成，有效 ${result.validCount} 条，失效 ${invalidTotal} 条`)
+          } else {
+            showSuccess(`校验完成，全部有效，共 ${result.validCount} 条`)
+          }
+        } catch (err) {
+          showError('获取校验结果失败，请重试或刷新页面')
+        } finally {
+          setValidating(false)
+        }
+      },
+      onCancelled: async () => {
+        try {
+          const result = await fetchValidationResult(sessionId.value)
+          setSourceData(buildValidationResultData(startResultData.value, result))
+          showWarning(`校验已取消，已保留 ${result.validCount} 条有效结果`)
+        } catch (err) {
           progressData.value = null
           showWarning('校验已取消')
+        } finally {
+          setValidating(false)
         }
-        return
+      },
+      onError: (message) => {
+        setValidating(false)
+        showError(message)
       }
-
-      progressData.value = {
-        processed: data.processed,
-        total: data.total,
-        valid: data.valid,
-        invalid: data.invalid,
-        current: data.current,
-        currentName: data.currentName || '',
-        estimatedRemaining: data.estimatedRemaining || 0,
-        status: data.status || 'running',
-        strategy: data.strategy || null
-      }
-    }
-
-    enableEventSourceRecovery(eventSource)
+    })
 
   } catch (err) {
-    stopTimer()
+    stopValidation()
     showError('校验失败，请稍后重试')
     setValidating(false)
   }
@@ -809,17 +744,6 @@ async function handleFullValidateUrl() {
 
   setValidating(true)
   setError(null)
-  progressData.value = {
-    processed: 0,
-    total: urlSourceData.value.dedupedSources?.length || 0,
-    valid: 0,
-    invalid: 0,
-    current: '',
-    currentName: '',
-    estimatedRemaining: 0
-  }
-
-  startTimer()
 
   try {
     const result = await startValidationFromData(
@@ -832,94 +756,51 @@ async function handleFullValidateUrl() {
     if (result.code !== 200) {
       showError(result.message)
       setValidating(false)
-      stopTimer()
       return
     }
 
     sessionId.value = result.sessionId
-    eventSource = getProgressEventSource(sessionId.value)
 
-    eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-
-      if (data.error) {
-        stopTimer()
-        showError(data.error)
-        eventSource.close()
-        setValidating(false)
-        return
-      }
-
-      if (data.status === 'completed' && data.validCount !== undefined) {
-        stopTimer()
-        eventSource.close()
-        setValidating(false)
-
-        const resultData = {
-          total: urlSourceData.value.total,
-          dedupCount: urlSourceData.value.dedupCount,
-          duplicates: urlSourceData.value.duplicates,
-          duplicateUrls: [],
-          formatInvalid: urlSourceData.value.formatInvalid,
-          deepInvalid: data.invalidCount,
-          validCount: data.validCount,
-          dedupedSources: data.validSources || [],
-          failedGroups: data.failedGroups || [],
-          failedCategories: data.failedCategories || {}
+    subscribeValidation({
+      label: '校验',
+      createSource: () => getProgressEventSource(sessionId.value),
+      initialProgress: { total: urlSourceData.value.dedupedSources?.length || 0 },
+      onCompleted: async () => {
+        try {
+          const result = await fetchValidationResult(sessionId.value)
+          setSourceData(buildValidationResultData(urlSourceData.value, result))
+          const invalidTotal = (urlSourceData.value.formatInvalid || 0) + (result.invalidCount || 0)
+          if (invalidTotal > 0) {
+            setSuccess(`校验完成！有效书源 ${result.validCount} 条，失效 ${invalidTotal} 条，耗时 ${elapsedTime.value} 秒`)
+          } else {
+            setSuccess(`校验完成！有效书源 ${result.validCount} 条，耗时 ${elapsedTime.value} 秒`)
+          }
+        } catch (err) {
+          showError('获取校验结果失败，请重试或刷新页面')
+        } finally {
+          setValidating(false)
         }
-
-        setSourceData(resultData)
-        const invalidTotal = urlSourceData.value.formatInvalid + (data.invalidCount || 0)
-        if (invalidTotal > 0) {
-          setSuccess(`校验完成！有效书源 ${data.validCount} 条，失效 ${invalidTotal} 条，耗时 ${elapsedTime.value} 秒`)
-        } else {
-          setSuccess(`校验完成！有效书源 ${data.validCount} 条，耗时 ${elapsedTime.value} 秒`)
-        }
-        return
-      }
-
-      if (data.status === 'cancelled') {
-        stopTimer()
-        eventSource.close()
-        setValidating(false)
-        if (data.validCount !== undefined) {
-          setSourceData({
-            total: urlSourceData.value.total,
-            dedupCount: urlSourceData.value.dedupCount,
-            duplicates: urlSourceData.value.duplicates,
-            duplicateUrls: [],
-            formatInvalid: urlSourceData.value.formatInvalid,
-            deepInvalid: data.invalidCount,
-            validCount: data.validCount,
-            dedupedSources: data.validSources || [],
-            failedGroups: data.failedGroups || [],
-            failedCategories: data.failedCategories || {}
-          })
-          showWarning(`校验已取消，已保留 ${data.validCount} 条有效结果`)
-        } else {
+      },
+      onCancelled: async () => {
+        try {
+          const result = await fetchValidationResult(sessionId.value)
+          setSourceData(buildValidationResultData(urlSourceData.value, result))
+          showWarning(`校验已取消，已保留 ${result.validCount} 条有效结果`)
+        } catch (err) {
           progressData.value = null
           showWarning('校验已取消')
+        } finally {
+          setValidating(false)
         }
-        return
+      },
+      onError: (message) => {
+        setValidating(false)
+        showError(message)
       }
-
-      progressData.value = {
-        processed: data.processed,
-        total: data.total,
-        valid: data.valid,
-        invalid: data.invalid,
-        current: data.current,
-        currentName: data.currentName || '',
-        estimatedRemaining: data.estimatedRemaining || 0,
-        status: data.status || 'running',
-        strategy: data.strategy || null
-      }
-    }
-
-    enableEventSourceRecovery(eventSource)
+    })
 
   } catch (err) {
-    stopTimer()
+    stopValidation()
     showError('校验失败，请稍后重试')
     setValidating(false)
   }
@@ -987,16 +868,6 @@ async function handleBatchProcess({ type, data, mode }) {
     startResultData.value = startResult
     sessionId.value = startResult.sessionId
 
-    progressData.value = {
-      processed: 0,
-      total: startResult.deepTotal,
-      valid: 0,
-      invalid: 0,
-      current: '',
-      currentName: '',
-      estimatedRemaining: 0
-    }
-
     // 更新批量统计
     if (batchProcessorRef.value) {
       batchProcessorRef.value.setStats({
@@ -1005,90 +876,56 @@ async function handleBatchProcess({ type, data, mode }) {
       })
     }
 
-    startTimer()
-    eventSource = getProgressEventSource(sessionId.value)
-
-    eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-
-      if (data.error) {
-        stopTimer()
-        showError(data.error)
-        eventSource.close()
-        setValidating(false)
-        return
-      }
-
-      if (data.status === 'completed' && data.validCount !== undefined) {
-        stopTimer()
-        eventSource.close()
-        setValidating(false)
-
-        const resultData = {
-          total: data.totalOriginal || startResult.total,
-          dedupCount: data.dedupCount || startResult.deepTotal,
-          duplicates: data.duplicates || 0,
-          duplicateUrls: [],
-          formatInvalid: data.formatInvalid || 0,
-          deepInvalid: data.invalidCount,
-          validCount: data.validCount,
-          dedupedSources: data.validSources || [],
-          failedGroups: data.failedGroups || [],
-          failedCategories: data.failedCategories || {}
+    subscribeValidation({
+      label: '批量校验',
+      createSource: () => getProgressEventSource(sessionId.value),
+      initialProgress: { total: startResult.deepTotal },
+      onCompleted: async () => {
+        try {
+          const result = await fetchValidationResult(sessionId.value)
+          setSourceData(buildValidationResultData({
+            total: result.totalOriginal || startResult.total,
+            dedupCount: result.dedupCount || startResult.deepTotal,
+            duplicates: result.duplicates || 0,
+            formatInvalid: result.formatInvalid || 0
+          }, result))
+          const invalidTotal = (result.formatInvalid || 0) + (result.invalidCount || 0)
+          if (invalidTotal > 0) {
+            setSuccess(`校验完成！有效书源 ${result.validCount} 条，失效 ${invalidTotal} 条，耗时 ${elapsedTime.value} 秒`)
+          } else {
+            setSuccess(`校验完成！有效书源 ${result.validCount} 条，耗时 ${elapsedTime.value} 秒`)
+          }
+        } catch (err) {
+          showError('获取校验结果失败，请重试或刷新页面')
+        } finally {
+          setValidating(false)
         }
-
-        setSourceData(resultData)
-        const invalidTotal = (data.formatInvalid || 0) + (data.invalidCount || 0)
-        if (invalidTotal > 0) {
-          setSuccess(`校验完成！有效书源 ${data.validCount} 条，失效 ${invalidTotal} 条，耗时 ${elapsedTime.value} 秒`)
-        } else {
-          setSuccess(`校验完成！有效书源 ${data.validCount} 条，耗时 ${elapsedTime.value} 秒`)
-        }
-        return
-      }
-
-      if (data.status === 'cancelled') {
-        stopTimer()
-        eventSource.close()
-        setValidating(false)
-        if (data.validCount !== undefined) {
-          setSourceData({
-            total: data.totalOriginal || startResult.total,
-            dedupCount: data.dedupCount || startResult.deepTotal,
-            duplicates: data.duplicates || 0,
-            duplicateUrls: [],
-            formatInvalid: data.formatInvalid || 0,
-            deepInvalid: data.invalidCount,
-            validCount: data.validCount,
-            dedupedSources: data.validSources || [],
-            failedGroups: data.failedGroups || [],
-            failedCategories: data.failedCategories || {}
-          })
-          showWarning(`校验已取消，已保留 ${data.validCount} 条有效结果`)
-        } else {
+      },
+      onCancelled: async () => {
+        try {
+          const result = await fetchValidationResult(sessionId.value)
+          setSourceData(buildValidationResultData({
+            total: result.totalOriginal || startResult.total,
+            dedupCount: result.dedupCount || startResult.deepTotal,
+            duplicates: result.duplicates || 0,
+            formatInvalid: result.formatInvalid || 0
+          }, result))
+          showWarning(`校验已取消，已保留 ${result.validCount} 条有效结果`)
+        } catch (err) {
           progressData.value = null
           showWarning('校验已取消')
+        } finally {
+          setValidating(false)
         }
-        return
+      },
+      onError: (message) => {
+        setValidating(false)
+        showError(message)
       }
-
-      progressData.value = {
-        processed: data.processed,
-        total: data.total,
-        valid: data.valid,
-        invalid: data.invalid,
-        current: data.current,
-        currentName: data.currentName || '',
-        estimatedRemaining: data.estimatedRemaining || 0,
-        status: data.status || 'running',
-        strategy: data.strategy || null
-      }
-    }
-
-    enableEventSourceRecovery(eventSource, '批量校验')
+    })
 
   } catch (err) {
-    stopTimer()
+    stopValidation()
     showError('批量校验失败，请稍后重试')
     setValidating(false)
   }
@@ -1136,27 +973,19 @@ async function handleResumeValidation() {
 
 // 搜索校验
 async function handleSearchValidation(payload) {
-  console.log('=== handleSearchValidation 被调用 ===')
-  console.log('payload:', payload)
-  console.log('state.file:', state.file)
-
   const { validateType, keyword, concurrency: searchConcurrency, timeout: searchTimeout, validationMode: searchValidationMode } = payload
 
   if (!state.file) {
-    console.error('state.file 为空，无法开始校验')
     showError('请先上传书源文件')
     return
   }
 
-  console.log('开始搜索校验，参数:', { validateType, keyword, searchConcurrency, searchTimeout })
   lastSearchConfig.value = { validateType, keyword }
 
   setValidating(true)
   setError(null)
-  progressData.value = null
 
   try {
-    console.log('调用 startSearchValidation API...')
     const startResult = await startSearchValidation(
       state.file,
       keyword,
@@ -1166,8 +995,6 @@ async function handleSearchValidation(payload) {
       searchValidationMode || validationMode.value
     )
 
-    console.log('startSearchValidation 返回结果:', startResult)
-
     if (startResult.code !== 200) {
       showError(startResult.message)
       setValidating(false)
@@ -1175,116 +1002,58 @@ async function handleSearchValidation(payload) {
     }
 
     sessionId.value = startResult.sessionId
-    console.log('搜索校验会话创建成功:', startResult)
 
-    progressData.value = {
-      processed: 0,
-      total: startResult.total,
-      valid: 0,
-      invalid: 0,
-      current: '',
-      currentName: '',
-      estimatedRemaining: 0
-    }
+    const typeLabel = validateType === 'search' ? '搜索' : '发现'
 
-    startTimer()
-    console.log('准备建立 SSE 连接:', `/api/validate/search/progress/${sessionId.value}`)
-
-    try {
-      eventSource = getSearchProgressEventSource(sessionId.value)
-      console.log('EventSource 创建完成:', eventSource)
-      console.log('EventSource readyState:', eventSource.readyState)
-      console.log('EventSource url:', eventSource.url)
-    } catch (esError) {
-      console.error('EventSource 创建失败:', esError)
-      throw esError
-    }
-
-    eventSource.onmessage = (event) => {
-      console.log('SSE 消息:', event.data)
-      const data = JSON.parse(event.data)
-
-      if (data.error) {
-        stopTimer()
-        showError(data.error)
-        eventSource.close()
-        setValidating(false)
-        return
-      }
-
-      if (data.status === 'completed' && data.validCount !== undefined) {
-        stopTimer()
-        eventSource.close()
-        setValidating(false)
-
-        const resultData = {
-          total: startResult.total,
-          dedupCount: startResult.total,
-          duplicates: 0,
-          duplicateUrls: [],
-          formatInvalid: 0,
-          deepInvalid: data.invalidCount,
-          validCount: data.validCount,
-          dedupedSources: data.validSources || [],
-          failedGroups: data.failedGroups || [],
-          failedCategories: data.failedCategories || {},
-          ruleTypeStats: data.ruleTypeStats || null
-        }
-
-        setSourceData(resultData)
-        const typeLabel = validateType === 'search' ? '搜索' : '发现'
-        if (data.invalidCount > 0) {
-          setSuccess(`${typeLabel}校验完成！有效书源 ${data.validCount} 条，失效 ${data.invalidCount} 条，耗时 ${elapsedTime.value} 秒`)
-        } else {
-          setSuccess(`${typeLabel}校验完成！有效书源 ${data.validCount} 条，耗时 ${elapsedTime.value} 秒`)
-        }
-        return
-      }
-
-      if (data.status === 'cancelled') {
-        stopTimer()
-        eventSource.close()
-        setValidating(false)
-        if (data.validCount !== undefined) {
-          setSourceData({
+    subscribeValidation({
+      label: '搜索校验',
+      createSource: () => getSearchProgressEventSource(sessionId.value),
+      initialProgress: { total: startResult.total },
+      onCompleted: async () => {
+        try {
+          const result = await fetchValidationResult(sessionId.value)
+          setSourceData(buildValidationResultData({
             total: startResult.total,
             dedupCount: startResult.total,
             duplicates: 0,
-            duplicateUrls: [],
-            formatInvalid: 0,
-            deepInvalid: data.invalidCount,
-            validCount: data.validCount,
-            dedupedSources: data.validSources || [],
-            failedGroups: data.failedGroups || [],
-            failedCategories: data.failedCategories || {},
-            ruleTypeStats: data.ruleTypeStats || null
-          })
-          showWarning(`校验已取消，已保留 ${data.validCount} 条有效结果`)
-        } else {
+            formatInvalid: 0
+          }, result, { ruleTypeStats: result.ruleTypeStats || null }))
+          if (result.invalidCount > 0) {
+            setSuccess(`${typeLabel}校验完成！有效书源 ${result.validCount} 条，失效 ${result.invalidCount} 条，耗时 ${elapsedTime.value} 秒`)
+          } else {
+            setSuccess(`${typeLabel}校验完成！有效书源 ${result.validCount} 条，耗时 ${elapsedTime.value} 秒`)
+          }
+        } catch (err) {
+          showError('获取校验结果失败，请重试或刷新页面')
+        } finally {
+          setValidating(false)
+        }
+      },
+      onCancelled: async () => {
+        try {
+          const result = await fetchValidationResult(sessionId.value)
+          setSourceData(buildValidationResultData({
+            total: startResult.total,
+            dedupCount: startResult.total,
+            duplicates: 0,
+            formatInvalid: 0
+          }, result, { ruleTypeStats: result.ruleTypeStats || null }))
+          showWarning(`校验已取消，已保留 ${result.validCount} 条有效结果`)
+        } catch (err) {
           progressData.value = null
           showWarning('校验已取消')
+        } finally {
+          setValidating(false)
         }
-        return
+      },
+      onError: (message) => {
+        setValidating(false)
+        showError(message)
       }
-
-      progressData.value = {
-        processed: data.processed,
-        total: data.total,
-        valid: data.valid,
-        invalid: data.invalid,
-        current: data.current,
-        currentName: data.currentName || '',
-        estimatedRemaining: data.estimatedRemaining || 0,
-        status: data.status || 'running',
-        strategy: data.strategy || null
-      }
-    }
-
-    enableEventSourceRecovery(eventSource, '搜索校验')
+    })
 
   } catch (err) {
-    console.error('搜索校验异常:', err)
-    stopTimer()
+    stopValidation()
     showError('搜索校验失败，请稍后重试')
     setValidating(false)
   }
@@ -1437,48 +1206,45 @@ async function handleRetryFailed(onlyNetwork) {
     }
 
     sessionId.value = startResult.sessionId
-    startTimer()
-    eventSource = processMode.value === 'search'
-      ? getSearchProgressEventSource(sessionId.value)
-      : getProgressEventSource(sessionId.value)
 
-    eventSource.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-      if (data.error) {
-        stopTimer()
-        eventSource.close()
+    subscribeValidation({
+      label: '失败重试',
+      createSource: () => processMode.value === 'search'
+        ? getSearchProgressEventSource(sessionId.value)
+        : getProgressEventSource(sessionId.value),
+      initialProgress: { total: retrySources.length },
+      onCompleted: async () => {
+        try {
+          const result = await fetchValidationResult(sessionId.value)
+          mergeRetryResult(result, skippedGroups)
+          retryContext.value = null
+          showSuccess(`重试完成，新增/保留有效 ${result.validCount} 条，仍失败 ${result.invalidCount || 0} 条`)
+        } catch (err) {
+          showError('获取重试结果失败，请稍后重试')
+        } finally {
+          setValidating(false)
+        }
+      },
+      onCancelled: async () => {
+        try {
+          const result = await fetchValidationResult(sessionId.value)
+          mergeRetryResult(result, skippedGroups)
+          retryContext.value = null
+          showSuccess(`重试已取消，新增/保留有效 ${result.validCount} 条，仍失败 ${result.invalidCount || 0} 条`)
+        } catch (err) {
+          progressData.value = null
+          showWarning('重试已取消')
+        } finally {
+          setValidating(false)
+        }
+      },
+      onError: (message) => {
         setValidating(false)
-        showError(data.error)
-        return
+        showError(message)
       }
-
-      if ((data.status === 'completed' || data.status === 'cancelled') && data.validCount !== undefined) {
-        stopTimer()
-        eventSource.close()
-        setValidating(false)
-        mergeRetryResult(data, skippedGroups)
-        retryContext.value = null
-        const prefix = data.status === 'cancelled' ? '重试已取消' : '重试完成'
-        showSuccess(`${prefix}，新增/保留有效 ${data.validCount} 条，仍失败 ${data.invalidCount || 0} 条`)
-        return
-      }
-
-      progressData.value = {
-        processed: data.processed,
-        total: data.total,
-        valid: data.valid,
-        invalid: data.invalid,
-        current: data.current,
-        currentName: data.currentName || '',
-        estimatedRemaining: data.estimatedRemaining || 0,
-        status: data.status || 'running',
-        strategy: data.strategy || null
-      }
-    }
-
-    enableEventSourceRecovery(eventSource, '失败重试')
+    })
   } catch (err) {
-    stopTimer()
+    stopValidation()
     setValidating(false)
     showError('重试失败，请稍后再试')
   }

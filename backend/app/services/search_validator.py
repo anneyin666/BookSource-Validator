@@ -8,7 +8,9 @@ from urllib.parse import quote
 import httpx
 
 from app.services.js_processor import JSRuleProcessor
+from app.services.url_security import UrlSecurityService
 from app.services.validation_strategy import get_retry_delay
+from app.utils.url_utils import strip_chinese_suffix
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +47,12 @@ class SearchValidatorService:
 
     @staticmethod
     def has_search_rule(source: dict) -> bool:
-        """检查书源是否有搜索规则"""
-        search_url = SearchValidatorService.get_search_url(source)
-        if not search_url:
-            return False
-        # 检查是否有搜索列表规则
-        search_list = source.get('searchList', '') or source.get('ruleSearch', {}).get('bookList', '')
-        return bool(search_list) or True  # 即使没有规则也尝试校验
+        """检查书源是否有搜索规则
+
+        只要配置了 searchUrl 即视为可校验搜索功能：
+        结果判断基于响应内容启发式，不依赖 searchList 解析规则。
+        """
+        return bool(SearchValidatorService.get_search_url(source))
 
     @staticmethod
     def has_explore_rule(source: dict) -> bool:
@@ -301,6 +302,104 @@ class SearchValidatorService:
         return True, 0
 
     @staticmethod
+    async def _request_and_check(
+        url: str,
+        source: dict,
+        method: str = "GET",
+        post_data: Optional[str] = None,
+        timeout: int = 30,
+        max_retries: int = 2,
+        no_result_reason: str = "搜索无结果",
+        error_label: str = "搜索校验",
+    ) -> Tuple[bool, str, Optional[List[dict]]]:
+        """执行带重试的搜索/发现请求并启发式检查响应内容。
+
+        搜索校验与发现校验共用此方法，避免重试与异常处理逻辑重复。
+        """
+        # 轻量 SSRF 拦截：本地主机名与私网/回环字面量 IP
+        if not UrlSecurityService.is_safe_request_target(url):
+            return False, "不允许访问该地址", None
+
+        last_error = ""
+
+        for attempt in range(max_retries + 1):
+            try:
+                # 第二次重试时强制使用 HTTP/1.1（禁用 HTTP/2）
+                use_http1 = attempt > 0
+                async with httpx.AsyncClient(
+                    timeout=timeout,
+                    follow_redirects=True,
+                    verify=False,
+                    http2=not use_http1,
+                    http1=True
+                ) as client:
+                    headers = dict(SearchValidatorService.MOBILE_HEADERS)
+                    # 添加书源自定义请求头
+                    if source.get('header'):
+                        try:
+                            headers.update(json.loads(source['header']))
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+
+                    if method == "POST":
+                        response = await client.post(url, data=post_data, headers=headers)
+                    else:
+                        response = await client.get(url, headers=headers)
+
+                    if response.status_code == 403:
+                        # Cloudflare 防护，视为成功
+                        return True, "", []
+
+                    if not (200 <= response.status_code < 400):
+                        return False, f"HTTP {response.status_code}", None
+
+                    content = response.text
+                    is_valid, _count = SearchValidatorService.check_search_results(content, source)
+
+                    if is_valid:
+                        return True, "", []
+                    return False, no_result_reason, None
+
+            except httpx.ConnectTimeout:
+                last_error = "连接超时"
+            except httpx.ReadTimeout:
+                last_error = "读取超时"
+            except httpx.WriteTimeout:
+                last_error = "写入超时"
+            except httpx.TimeoutException:
+                last_error = "超时"
+            except httpx.ConnectError:
+                last_error = "连接失败"
+            except httpx.RemoteProtocolError as e:
+                # HTTP 协议错误（如 Server disconnected）
+                error_msg = str(e)[:50]
+                if 'disconnected' in error_msg.lower():
+                    last_error = "服务器断开"
+                else:
+                    last_error = "协议错误"
+            except httpx.HTTPStatusError as e:
+                return False, f"HTTP {e.response.status_code}", None
+            except httpx.RequestError as e:
+                # 捕获所有 httpx 网络错误（包括 SSL 错误）
+                error_msg = str(e)[:50] if str(e) else type(e).__name__
+                if 'ssl' in error_msg.lower() or 'certificate' in error_msg.lower():
+                    last_error = "SSL错误"
+                elif not error_msg:
+                    last_error = "网络错误"
+                else:
+                    last_error = error_msg
+            except Exception as e:
+                error_msg = str(e)[:50]
+                logger.error(f"{error_label}异常 [{url}]: {error_msg}")
+                last_error = error_msg
+                break
+
+            if attempt < max_retries:
+                await asyncio.sleep(get_retry_delay(attempt))
+
+        return False, last_error if last_error else "未知错误", None
+
+    @staticmethod
     async def validate_search(
         source: dict,
         keyword: str,
@@ -322,18 +421,8 @@ class SearchValidatorService:
         if not search_url:
             return False, "无搜索规则", None
 
-        # 获取书源基础URL用于补全相对路径
-        base_url = source.get('bookSourceUrl', '')
-
-        # 清理 base_url 中的中文字符（如作者信息）
-        chinese_match = re.search(r'[\u4e00-\u9fff]', base_url)
-        if chinese_match:
-            chinese_index = chinese_match.start()
-            slash_index = base_url.find('/', 8)  # 跳过 http:// 或 https://
-            if slash_index != -1 and chinese_index > slash_index:
-                base_url = base_url[:chinese_index]
-            elif chinese_index > 8:
-                base_url = base_url[:chinese_index]
+        # 获取书源基础URL用于补全相对路径（清理拼接的中文作者信息）
+        base_url = strip_chinese_suffix(source.get('bookSourceUrl', ''))
 
         # 检查是否包含 JavaScript 规则
         if '@js:' in search_url or 'javascript:' in search_url.lower():
@@ -368,104 +457,16 @@ class SearchValidatorService:
         if not url or not url.startswith(('http://', 'https://')):
             return False, "URL格式错误", None
 
-        last_error = ""
-
-        for attempt in range(max_retries + 1):
-            try:
-                # 第二次重试时强制使用 HTTP/1.1
-                use_http1 = attempt > 0
-                async with httpx.AsyncClient(
-                    timeout=timeout,
-                    follow_redirects=True,
-                    verify=False,
-                    http2=not use_http1,  # 第二次禁用 HTTP/2
-                    http1=True
-                ) as client:
-                    headers = dict(SearchValidatorService.MOBILE_HEADERS)
-                    # 添加书源自定义请求头
-                    if source.get('header'):
-                        try:
-                            custom_headers = json.loads(source['header'])
-                            headers.update(custom_headers)
-                        except:
-                            pass
-
-                    if method == "POST":
-                        response = await client.post(url, data=post_data, headers=headers)
-                    else:
-                        response = await client.get(url, headers=headers)
-
-                    if response.status_code == 403:
-                        # Cloudflare 防护，视为成功
-                        return True, "", []
-
-                    if not (200 <= response.status_code < 400):
-                        return False, f"HTTP {response.status_code}", None
-
-                    content = response.text
-                    is_valid, count = SearchValidatorService.check_search_results(content, source)
-
-                    if is_valid:
-                        return True, "", []
-                    else:
-                        return False, "搜索无结果", None
-
-            except httpx.TimeoutException:
-                last_error = "超时"
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except httpx.ConnectError:
-                last_error = "连接失败"
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except httpx.ConnectTimeout:
-                last_error = "连接超时"
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except httpx.ReadTimeout:
-                last_error = "读取超时"
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except httpx.WriteTimeout:
-                last_error = "写入超时"
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except httpx.RemoteProtocolError as e:
-                # HTTP 协议错误（如 Server disconnected）- 重试
-                error_msg = str(e)[:50]
-                if 'disconnected' in error_msg.lower():
-                    last_error = "服务器断开"
-                else:
-                    last_error = "协议错误"
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except httpx.HTTPStatusError as e:
-                return False, f"HTTP {e.response.status_code}", None
-            except httpx.RequestError as e:
-                # 捕获所有 httpx 网络错误（包括 SSL 错误）
-                error_msg = str(e)[:50] if str(e) else type(e).__name__
-                if 'ssl' in error_msg.lower() or 'certificate' in error_msg.lower():
-                    last_error = "SSL错误"
-                elif not error_msg:
-                    last_error = "网络错误"
-                else:
-                    last_error = error_msg
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except Exception as e:
-                error_msg = str(e)[:50]
-                logger.error(f"搜索校验异常 [{url}]: {error_msg}")
-                last_error = error_msg
-                break
-
-        return False, last_error if last_error else "未知错误", None
+        return await SearchValidatorService._request_and_check(
+            url,
+            source,
+            method=method,
+            post_data=post_data,
+            timeout=timeout,
+            max_retries=max_retries,
+            no_result_reason="搜索无结果",
+            error_label="搜索校验",
+        )
 
     @staticmethod
     async def validate_explore(
@@ -510,17 +511,8 @@ class SearchValidatorService:
 
         # 修复URL前缀 - 如果URL不以http开头，尝试补全
         if not url.startswith(('http://', 'https://')):
-            base_url = source.get('bookSourceUrl', '')
-
-            # 清理 base_url 中的中文字符（如作者信息）
-            chinese_match = re.search(r'[\u4e00-\u9fff]', base_url)
-            if chinese_match:
-                chinese_index = chinese_match.start()
-                slash_index = base_url.find('/', 8)  # 跳过 http:// 或 https://
-                if slash_index != -1 and chinese_index > slash_index:
-                    base_url = base_url[:chinese_index]
-                elif chinese_index > 8:
-                    base_url = base_url[:chinese_index]
+            # 清理 base_url 中拼接的中文作者信息
+            base_url = strip_chinese_suffix(source.get('bookSourceUrl', ''))
 
             if base_url and base_url.startswith(('http://', 'https://')):
                 from urllib.parse import urlparse
@@ -535,97 +527,15 @@ class SearchValidatorService:
             else:
                 url = "https://" + url
 
-        last_error = ""
-
-        for attempt in range(max_retries + 1):
-            try:
-                # 第二次重试时强制使用 HTTP/1.1
-                use_http1 = attempt > 0
-                async with httpx.AsyncClient(
-                    timeout=timeout,
-                    follow_redirects=True,
-                    verify=False,
-                    http2=not use_http1,
-                    http1=True
-                ) as client:
-                    headers = dict(SearchValidatorService.MOBILE_HEADERS)
-                    if source.get('header'):
-                        try:
-                            custom_headers = json.loads(source['header'])
-                            headers.update(custom_headers)
-                        except:
-                            pass
-
-                    response = await client.get(url, headers=headers)
-
-                    if response.status_code == 403:
-                        return True, "", []
-
-                    if not (200 <= response.status_code < 400):
-                        return False, f"HTTP {response.status_code}", None
-
-                    content = response.text
-                    is_valid, count = SearchValidatorService.check_search_results(content, source)
-
-                    if is_valid:
-                        return True, "", []
-                    else:
-                        return False, "发现无结果", None
-
-            except httpx.TimeoutException:
-                last_error = "超时"
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except httpx.ConnectError:
-                last_error = "连接失败"
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except httpx.ConnectTimeout:
-                last_error = "连接超时"
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except httpx.ReadTimeout:
-                last_error = "读取超时"
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except httpx.WriteTimeout:
-                last_error = "写入超时"
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except httpx.RemoteProtocolError as e:
-                error_msg = str(e)[:50]
-                if 'disconnected' in error_msg.lower():
-                    last_error = "服务器断开"
-                else:
-                    last_error = "协议错误"
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except httpx.HTTPStatusError as e:
-                return False, f"HTTP {e.response.status_code}", None
-            except httpx.RequestError as e:
-                error_msg = str(e)[:50] if str(e) else type(e).__name__
-                if 'ssl' in error_msg.lower() or 'certificate' in error_msg.lower():
-                    last_error = "SSL错误"
-                elif not error_msg:
-                    last_error = "网络错误"
-                else:
-                    last_error = error_msg
-                if attempt < max_retries:
-                    await asyncio.sleep(get_retry_delay(attempt))
-                    continue
-            except Exception as e:
-                error_msg = str(e)[:50]
-                logger.error(f"发现校验异常 [{url}]: {error_msg}")
-                last_error = error_msg
-                break
-
-        return False, last_error if last_error else "未知错误", None
+        return await SearchValidatorService._request_and_check(
+            url,
+            source,
+            method="GET",
+            timeout=timeout,
+            max_retries=max_retries,
+            no_result_reason="发现无结果",
+            error_label="发现校验",
+        )
 
     @staticmethod
     async def batch_validate_search(
@@ -722,7 +632,7 @@ ERROR_CATEGORIES = {
         'icon': '❌',
         'hint': '这些书源规则有问题或使用了不支持的加密',
         'keywords': ['无搜索规则', '无发现规则', 'URL格式错误', '无效发现URL',
-                     '不支持', '无法解析JS', 'JS解析失败', '加密']
+                     '不支持', '无法解析JS', 'JS解析失败', '加密', '不允许访问']
     },
     'checkable': {
         'name': '需检查',

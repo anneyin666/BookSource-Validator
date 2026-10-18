@@ -142,6 +142,20 @@ export function getSearchProgressEventSource(sessionId) {
 }
 
 /**
+ * 获取校验完整结果
+ *
+ * SSE 完成消息只携带统计数据，书源明细通过此接口单独拉取，
+ * 避免弱网/低带宽下超长 SSE 消息被掐断。
+ * @param {string} sessionId - 会话ID
+ */
+export async function getValidationResult(sessionId) {
+  const response = await axios.get(`${API_BASE}/validate/result/${sessionId}`, {
+    timeout: 60000
+  })
+  return response.data
+}
+
+/**
  * 取消校验
  * @param {string} sessionId - 会话ID
  */

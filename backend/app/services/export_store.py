@@ -4,6 +4,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, Optional
 
+from app.config import settings
+
 
 @dataclass
 class ExportPayload:
@@ -14,12 +16,16 @@ class ExportPayload:
     expires_at: int
 
 
+DEFAULT_MAX_EXPORTS = settings.MAX_EXPORTS
+
+
 class ExportStore:
     """内存中的临时导出缓存。"""
 
-    def __init__(self):
+    def __init__(self, max_exports: int = DEFAULT_MAX_EXPORTS):
         self._exports: Dict[str, ExportPayload] = {}
         self._lock = asyncio.Lock()
+        self._max_exports = max_exports
 
     async def create_export(self, content: str, filename: str, ttl_seconds: int) -> ExportPayload:
         now = int(time.time())
@@ -31,6 +37,7 @@ class ExportStore:
         )
         async with self._lock:
             self._cleanup_expired_locked(now)
+            self._evict_overflow_locked()
             self._exports[payload.export_id] = payload
         return payload
 
@@ -48,6 +55,12 @@ class ExportStore:
         ]
         for export_id in expired_ids:
             self._exports.pop(export_id, None)
+
+    def _evict_overflow_locked(self) -> None:
+        """导出数达到上限时淘汰最早的条目，防止内存被无限占用。"""
+        while len(self._exports) >= self._max_exports:
+            oldest_id = next(iter(self._exports))
+            self._exports.pop(oldest_id, None)
 
 
 export_store = ExportStore()
