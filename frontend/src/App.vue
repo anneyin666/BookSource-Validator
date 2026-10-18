@@ -321,7 +321,8 @@ import { useSources } from './composables/useSources.js'
 import { useToast } from './composables/useToast.js'
 import { useLegadoExport } from './composables/useLegadoExport.js'
 import { useFailedRetry } from './composables/useFailedRetry.js'
-import { parseFile, parseUrl, startValidation, startValidationFromData, getProgressEventSource, getSearchProgressEventSource, cancelValidation, pauseValidation, resumeValidation, startBatchFilesValidation, startBatchUrlsValidation, parseBatchFiles, parseBatchUrls, startSearchValidation, startSearchValidationFromData } from './api/sources.js'
+import { useBatchProcess } from './composables/useBatchProcess.js'
+import { parseFile, parseUrl, startValidation, startValidationFromData, getProgressEventSource, getSearchProgressEventSource, cancelValidation, pauseValidation, resumeValidation, startSearchValidation, startSearchValidationFromData } from './api/sources.js'
 import { downloadJson, formatDate, openExternalUrl } from './utils/download.js'
 import { buildValidationResultData, fetchValidationResult } from './utils/validationResult.js'
 import { useSSEValidation } from './composables/useSSEValidation.js'
@@ -397,6 +398,29 @@ const {
 } = useSSEValidation({
   onDisconnect: (label) => showWarning(`${label}连接暂时中断，正在自动恢复，服务器仍在校验`),
   onReconnect: (label) => showSuccess(`${label}连接已恢复`)
+})
+
+// 批量处理流程（批量去重 / 批量校验）
+const { handleBatchProcess } = useBatchProcess({
+  state,
+  setLoading,
+  setValidating,
+  setError,
+  setSourceData,
+  setSuccess,
+  showError,
+  showWarning,
+  progressData,
+  elapsedTime,
+  subscribeValidation,
+  stopValidation,
+  concurrency,
+  timeout,
+  filterTypes,
+  validationMode,
+  sessionId,
+  startResultData,
+  batchProcessorRef
 })
 
 // 从localStorage读取设置
@@ -701,131 +725,6 @@ async function handleFullValidateUrl() {
   } catch (err) {
     stopValidation()
     showError('校验失败，请稍后重试')
-    setValidating(false)
-  }
-}
-
-// 批量处理
-async function handleBatchProcess({ type, data, mode }) {
-  setError(null)
-
-  const filterTypesStr = filterTypes.value.join(',')
-
-  // 批量去重模式 - 直接请求
-  if (mode === 'dedup') {
-    setLoading(true)
-    try {
-      let result
-      if (type === 'files') {
-        result = await parseBatchFiles(data, 'dedup', concurrency.value, timeout.value, filterTypesStr, validationMode.value)
-      } else {
-        result = await parseBatchUrls(data, 'dedup', concurrency.value, timeout.value, filterTypesStr, validationMode.value)
-      }
-
-      if (result.code !== 200) {
-        showError(result.message)
-        return
-      }
-
-      // 更新批量统计
-      if (batchProcessorRef.value) {
-        batchProcessorRef.value.setStats({
-          fileStats: result.data.fileStats,
-          urlStats: result.data.urlStats
-        })
-      }
-
-      setSourceData(result.data)
-      setSuccess(`批量去重完成！有效书源 ${result.data.validCount} 条`)
-    } catch (err) {
-      showError('批量处理失败，请稍后重试')
-    } finally {
-      setLoading(false)
-    }
-    return
-  }
-
-  // 批量校验模式 - 使用 SSE
-  setValidating(true)
-  progressData.value = null
-  startResultData.value = null
-
-  try {
-    let startResult
-    if (type === 'files') {
-      startResult = await startBatchFilesValidation(data, concurrency.value, timeout.value, filterTypesStr, validationMode.value)
-    } else {
-      startResult = await startBatchUrlsValidation(data, concurrency.value, timeout.value, filterTypesStr, validationMode.value)
-    }
-
-    if (startResult.code !== 200) {
-      showError(startResult.message)
-      setValidating(false)
-      return
-    }
-
-    startResultData.value = startResult
-    sessionId.value = startResult.sessionId
-
-    // 更新批量统计
-    if (batchProcessorRef.value) {
-      batchProcessorRef.value.setStats({
-        fileStats: startResult.fileStats,
-        urlStats: startResult.urlStats
-      })
-    }
-
-    subscribeValidation({
-      label: '批量校验',
-      createSource: () => getProgressEventSource(sessionId.value),
-      initialProgress: { total: startResult.deepTotal },
-      onCompleted: async () => {
-        try {
-          const result = await fetchValidationResult(sessionId.value)
-          setSourceData(buildValidationResultData({
-            total: result.totalOriginal || startResult.total,
-            dedupCount: result.dedupCount || startResult.deepTotal,
-            duplicates: result.duplicates || 0,
-            formatInvalid: result.formatInvalid || 0
-          }, result))
-          const invalidTotal = (result.formatInvalid || 0) + (result.invalidCount || 0)
-          if (invalidTotal > 0) {
-            setSuccess(`校验完成！有效书源 ${result.validCount} 条，失效 ${invalidTotal} 条，耗时 ${elapsedTime.value} 秒`)
-          } else {
-            setSuccess(`校验完成！有效书源 ${result.validCount} 条，耗时 ${elapsedTime.value} 秒`)
-          }
-        } catch (err) {
-          showError('获取校验结果失败，请重试或刷新页面')
-        } finally {
-          setValidating(false)
-        }
-      },
-      onCancelled: async () => {
-        try {
-          const result = await fetchValidationResult(sessionId.value)
-          setSourceData(buildValidationResultData({
-            total: result.totalOriginal || startResult.total,
-            dedupCount: result.dedupCount || startResult.deepTotal,
-            duplicates: result.duplicates || 0,
-            formatInvalid: result.formatInvalid || 0
-          }, result))
-          showWarning(`校验已取消，已保留 ${result.validCount} 条有效结果`)
-        } catch (err) {
-          progressData.value = null
-          showWarning('校验已取消')
-        } finally {
-          setValidating(false)
-        }
-      },
-      onError: (message) => {
-        setValidating(false)
-        showError(message)
-      }
-    })
-
-  } catch (err) {
-    stopValidation()
-    showError('批量校验失败，请稍后重试')
     setValidating(false)
   }
 }

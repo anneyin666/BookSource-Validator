@@ -507,7 +507,20 @@ npm run preview
 
 详细文档：[SESSION_24](docs/sessions/SESSION_24_SEARCH_ADAPTIVE_SCHEDULER.md)
 
+### 会话 25 - 2026-10-18
+
+**主题**：批量流程拆分
+
+**完成任务**：
+1. 新增 `composables/useBatchProcess.js`，批量去重与批量校验流程抽离
+2. App.vue 1573 → 1461 行
+3. 更新前端组件设计文档
+
+**验证**：前端 6 tests passed，构建成功
+
+详细文档：[SESSION_25](docs/sessions/SESSION_25_BATCH_FLOW_SPLIT.md)
+
 ---
 
-文档版本：v1.9
+文档版本：v2.0
 最后更新：2026-10-18
