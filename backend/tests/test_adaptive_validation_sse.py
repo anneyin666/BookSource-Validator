@@ -352,6 +352,18 @@ def test_search_sse_does_not_retry_rule_failures(monkeypatch):
     assert len(calls) == 1
 
 
+def test_health_supports_head_and_reports_presets():
+    """健康接口必须同时支持 GET/HEAD 探活，并暴露支持的模式。"""
+    client = TestClient(app)
+
+    get_response = client.get("/api/health")
+    head_response = client.head("/api/health")
+
+    assert get_response.status_code == 200
+    assert head_response.status_code == 200
+    assert "turbo" in get_response.json()["presets"]
+
+
 def test_search_cancel_while_paused_keeps_partial_result(monkeypatch):
     """搜索校验暂停期间取消，应正常返回取消状态。"""
     started = threading.Event()

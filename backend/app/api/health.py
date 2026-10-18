@@ -6,7 +6,7 @@ from app.services.validation_strategy import PRESET_OPTIONS
 router = APIRouter()
 
 
-@router.get("/health")
+@router.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
-    """健康检查（附带支持的模式，便于排查前后端版本不一致）"""
+    """健康检查（支持 GET/HEAD 探活，附带支持的模式）"""
     return {"status": "ok", "presets": sorted(PRESET_OPTIONS.keys())}

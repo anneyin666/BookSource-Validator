@@ -624,7 +624,20 @@ npm run preview
 
 详细文档：[SESSION_33](docs/sessions/SESSION_33_DEAD_BATCH_ADAPTATION.md)
 
+### 会话 34 - 2026-10-18
+
+**主题**：健康接口与首页 HEAD 探活
+
+**完成任务**：
+1. `/api/health`、首页 `/`、SPA 兜底路由支持 HEAD（原先 405）
+2. 保留 presets 返回；新增 HEAD 探活测试
+3. 服务器本地提交 8802e02 的能力并入主仓库，减少后续冲突
+
+**验证**：HEAD 健康/首页 200，后端 63 passed
+
+详细文档：[SESSION_34](docs/sessions/SESSION_34_HEAD_PROBE.md)
+
 ---
 
-文档版本：v2.8
+文档版本：v2.9
 最后更新：2026-10-18

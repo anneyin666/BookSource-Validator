@@ -104,8 +104,8 @@ if FRONTEND_DIST.exists() and FRONTEND_DIST.is_dir():
     if assets_path.exists():
         app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
 
-    # SPA 路由处理：所有非 API 路由返回 index.html
-    @app.get("/{full_path:path}")
+    # SPA 路由处理：所有非 API 路由返回 index.html（支持 HEAD 探活）
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"])
     async def serve_spa(full_path: str):
         """
         处理 SPA 路由
@@ -125,8 +125,8 @@ if FRONTEND_DIST.exists() and FRONTEND_DIST.is_dir():
         return {"error": "File not found"}
 
 
-# 根路径（开发环境使用）
-@app.get("/")
+# 根路径（开发环境使用，支持 HEAD 探活）
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     # 生产环境下由 SPA 处理
     if FRONTEND_DIST.exists():
