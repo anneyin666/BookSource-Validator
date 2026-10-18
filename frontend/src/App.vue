@@ -159,130 +159,22 @@
       />
 
       <!-- 统计结果 -->
-      <section class="stats-section" v-if="state.sourceData">
-        <h2 class="section-title">📊 统计结果</h2>
-        <StatsCardGroup :stats="stats" />
-
-        <!-- 规则类型统计（搜索校验模式） -->
-        <div v-if="stats.ruleTypeStats && processMode === 'search'" class="rule-type-stats">
-          <h3 class="rule-type-title">📋 规则类型分布</h3>
-          <div class="rule-type-cards">
-            <div class="rule-type-card search-only">
-              <div class="rule-type-label">🔍 仅搜索</div>
-              <div class="rule-type-numbers">
-                <span class="valid">{{ stats.ruleTypeStats.searchOnly.valid }} 有效</span>
-                <span class="invalid">{{ stats.ruleTypeStats.searchOnly.invalid }} 失效</span>
-              </div>
-              <div class="rule-type-total">共 {{ stats.ruleTypeStats.searchOnly.total }} 条</div>
-            </div>
-            <div class="rule-type-card explore-only">
-              <div class="rule-type-label">📖 仅发现</div>
-              <div class="rule-type-numbers">
-                <span class="valid">{{ stats.ruleTypeStats.exploreOnly.valid }} 有效</span>
-                <span class="invalid">{{ stats.ruleTypeStats.exploreOnly.invalid }} 失效</span>
-              </div>
-              <div class="rule-type-total">共 {{ stats.ruleTypeStats.exploreOnly.total }} 条</div>
-            </div>
-            <div class="rule-type-card both">
-              <div class="rule-type-label">🔍📖 搜索+发现</div>
-              <div class="rule-type-numbers">
-                <span class="valid">{{ stats.ruleTypeStats.both.valid }} 有效</span>
-                <span class="invalid">{{ stats.ruleTypeStats.both.invalid }} 失效</span>
-              </div>
-              <div class="rule-type-total">共 {{ stats.ruleTypeStats.both.total }} 条</div>
-            </div>
-            <div class="rule-type-card none" v-if="stats.ruleTypeStats.none.total > 0">
-              <div class="rule-type-label">❌ 无规则</div>
-              <div class="rule-type-numbers">
-                <span class="invalid">{{ stats.ruleTypeStats.none.invalid }} 失效</span>
-              </div>
-              <div class="rule-type-total">共 {{ stats.ruleTypeStats.none.total }} 条</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- 失败书源分析（分类展示） -->
-        <FailedSources
-          v-if="state.sourceData.failedCategories && Object.keys(state.sourceData.failedCategories).length > 0"
-          :failed-categories="state.sourceData.failedCategories"
-        />
-
-        <!-- 失败书源分组（详细列表） -->
-        <div v-if="state.sourceData.failedGroups && state.sourceData.failedGroups.length > 0" class="failed-groups">
-          <h3 class="failed-title">📋 失败详情（按原因分组）</h3>
-          <div class="failed-list">
-            <div
-              v-for="group in state.sourceData.failedGroups"
-              :key="group.reason || 'unknown'"
-              class="failed-item"
-            >
-              <div class="failed-header" @click="toggleFailedGroup(group.reason)">
-                <span class="failed-reason">{{ group.reason || '未知错误' }}</span>
-                <span class="failed-count">{{ group.count }} 条</span>
-                <span class="failed-toggle">{{ expandedGroups[group.reason] ? '▼' : '▶' }}</span>
-              </div>
-              <div v-if="expandedGroups[group.reason]" class="failed-sources">
-                <div
-                  v-for="source in group.sources"
-                  :key="source.bookSourceUrl"
-                  class="failed-source-item"
-                >
-                  <span class="source-name">{{ source.bookSourceName || '未命名' }}</span>
-                  <span class="source-url">{{ source.bookSourceUrl }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-          <!-- 导出失败书源按钮 -->
-          <div class="failed-actions">
-            <button class="retry-failed-btn" @click="handleRetryFailed(false)">
-              🔁 重试全部失败
-            </button>
-            <button class="retry-network-btn" @click="handleRetryFailed(true)">
-              🌐 仅重试网络/超时
-            </button>
-            <button class="export-failed-btn" @click="handleExportFailed">
-              📥 导出失败书源
-            </button>
-          </div>
-        </div>
-
-        <DownloadButton
-          :enabled="hasValidSources"
-          :count="state.sourceData?.validCount || 0"
-          :exporting-app="legadoExport.loading"
-          :app-ready="legadoExport.ready"
-          @download="handleDownload"
-          @export-app="handleExportToLegado"
-        />
-
-        <div
-          v-if="hasValidSources && (legadoExport.loading || legadoExport.downloadUrl)"
-          class="mobile-export-panel"
-        >
-          <p class="mobile-export-title">导出到阅读 App</p>
-          <p class="mobile-export-hint">
-            手机浏览器可直接唤起阅读导入当前有效书源；如果没有自动跳转，可改用下面的临时 JSON 链接。
-          </p>
-          <p v-if="legadoExport.loading" class="mobile-export-status">正在准备临时导出链接...</p>
-          <div v-else class="mobile-export-links">
-            <a
-              class="mobile-export-link"
-              :href="legadoExport.downloadUrl"
-              target="_blank"
-              rel="noreferrer"
-            >
-              打开临时 JSON 链接
-            </a>
-            <span class="mobile-export-expire">{{ legadoExportExpireText }}</span>
-          </div>
-        </div>
-
-        <!-- 重新处理按钮 -->
-        <button class="restart-btn" @click="handleClear">
-          🔄 重新处理
-        </button>
-      </section>
+      <ResultPanel
+        v-if="state.sourceData"
+        :source-data="state.sourceData"
+        :stats="stats"
+        :process-mode="processMode"
+        :has-valid-sources="hasValidSources"
+        :expanded-groups="expandedGroups"
+        :legado-export="legadoExport"
+        :legado-export-expire-text="legadoExportExpireText"
+        @toggle-group="toggleFailedGroup"
+        @retry-failed="handleRetryFailed"
+        @export-failed="handleExportFailed"
+        @download="handleDownload"
+        @export-app="handleExportToLegado"
+        @restart="handleClear"
+      />
 
       <!-- 空状态提示 -->
       <section class="empty-section" v-else-if="processMode === 'single' && !hasFile && !hasUrlData">
@@ -304,8 +196,7 @@
 import FileUpload from './components/FileUpload.vue'
 import UrlInput from './components/UrlInput.vue'
 import ActionButtons from './components/ActionButtons.vue'
-import StatsCardGroup from './components/StatsCardGroup.vue'
-import DownloadButton from './components/DownloadButton.vue'
+import ResultPanel from './components/ResultPanel.vue'
 import MessageAlert from './components/MessageAlert.vue'
 import ConcurrencySelector from './components/ConcurrencySelector.vue'
 import TimeoutSelector from './components/TimeoutSelector.vue'
@@ -316,18 +207,17 @@ import ThemeToggle from './components/ThemeToggle.vue'
 import FilterOptions from './components/FilterOptions.vue'
 import BatchProcessor from './components/BatchProcessor.vue'
 import SearchValidator from './components/SearchValidator.vue'
-import FailedSources from './components/FailedSources.vue'
 import { useSources } from './composables/useSources.js'
 import { useToast } from './composables/useToast.js'
 import { useLegadoExport } from './composables/useLegadoExport.js'
 import { useFailedRetry } from './composables/useFailedRetry.js'
 import { useBatchProcess } from './composables/useBatchProcess.js'
 import { useSingleProcess } from './composables/useSingleProcess.js'
-import { getProgressEventSource, getSearchProgressEventSource, cancelValidation, pauseValidation, resumeValidation, startSearchValidation, startSearchValidationFromData } from './api/sources.js'
+import { useSearchValidation } from './composables/useSearchValidation.js'
+import { cancelValidation, pauseValidation, resumeValidation } from './api/sources.js'
 import { downloadJson, formatDate, openExternalUrl } from './utils/download.js'
-import { buildValidationResultData, fetchValidationResult } from './utils/validationResult.js'
 import { useSSEValidation } from './composables/useSSEValidation.js'
-import { ref, computed, onMounted, watch, onUnmounted } from 'vue'
+import { ref, onMounted, watch, onUnmounted } from 'vue'
 
 const {
   state,
@@ -372,19 +262,9 @@ const {
   showWarning
 })
 
-// 失败重试纯逻辑（筛选/归一化/结果合并）
-const { collectFailedSources, mergeRetryResultData } = useFailedRetry()
-
-
-
 // SSE 相关
 const sessionId = ref(null)
 const startResultData = ref(null)
-const retryContext = ref(null)
-const lastSearchConfig = ref({
-  validateType: 'search',
-  keyword: '玄幻'
-})
 
 // 统一的 SSE 校验订阅（含进度解析、断线恢复与强制重连看门狗）
 const {
@@ -424,7 +304,6 @@ const { handleBatchProcess } = useBatchProcess({
 // 单个处理流程（文件/在线链接的去重与深度校验）
 const {
   urlInput,
-  urlSourceData,
   hasUrlData,
   handleFileUpload,
   handleUrlFetch,
@@ -455,6 +334,42 @@ const {
   subscribeValidation,
   stopValidation,
   isSingleMode: () => processMode.value === 'single'
+})
+
+// 搜索校验流程
+const { lastSearchConfig, handleSearchValidation } = useSearchValidation({
+  state,
+  setValidating,
+  setError,
+  setSourceData,
+  setSuccess,
+  showError,
+  showWarning,
+  validationMode,
+  sessionId,
+  progressData,
+  elapsedTime,
+  subscribeValidation,
+  stopValidation
+})
+
+// 失败重试（纯逻辑 + 重试会话编排）
+const { handleRetryFailed } = useFailedRetry({
+  state,
+  setValidating,
+  setSourceData,
+  progressData,
+  subscribeValidation,
+  stopValidation,
+  concurrency,
+  timeout,
+  validationMode,
+  sessionId,
+  processMode,
+  lastSearchConfig,
+  showSuccess,
+  showWarning,
+  showError
 })
 
 // 从localStorage读取设置
@@ -558,94 +473,6 @@ async function handleResumeValidation() {
   }
 }
 
-// 搜索校验
-async function handleSearchValidation(payload) {
-  const { validateType, keyword, concurrency: searchConcurrency, timeout: searchTimeout, validationMode: searchValidationMode } = payload
-
-  if (!state.file) {
-    showError('请先上传书源文件')
-    return
-  }
-
-  lastSearchConfig.value = { validateType, keyword }
-
-  setValidating(true)
-  setError(null)
-
-  try {
-    const startResult = await startSearchValidation(
-      state.file,
-      keyword,
-      validateType,
-      searchConcurrency || 16,
-      searchTimeout || 30,
-      searchValidationMode || validationMode.value
-    )
-
-    if (startResult.code !== 200) {
-      showError(startResult.message)
-      setValidating(false)
-      return
-    }
-
-    sessionId.value = startResult.sessionId
-
-    const typeLabel = validateType === 'search' ? '搜索' : '发现'
-
-    subscribeValidation({
-      label: '搜索校验',
-      createSource: () => getSearchProgressEventSource(sessionId.value),
-      initialProgress: { total: startResult.total },
-      onCompleted: async () => {
-        try {
-          const result = await fetchValidationResult(sessionId.value)
-          setSourceData(buildValidationResultData({
-            total: startResult.total,
-            dedupCount: startResult.total,
-            duplicates: 0,
-            formatInvalid: 0
-          }, result, { ruleTypeStats: result.ruleTypeStats || null }))
-          if (result.invalidCount > 0) {
-            setSuccess(`${typeLabel}校验完成！有效书源 ${result.validCount} 条，失效 ${result.invalidCount} 条，耗时 ${elapsedTime.value} 秒`)
-          } else {
-            setSuccess(`${typeLabel}校验完成！有效书源 ${result.validCount} 条，耗时 ${elapsedTime.value} 秒`)
-          }
-        } catch (err) {
-          showError('获取校验结果失败，请重试或刷新页面')
-        } finally {
-          setValidating(false)
-        }
-      },
-      onCancelled: async () => {
-        try {
-          const result = await fetchValidationResult(sessionId.value)
-          setSourceData(buildValidationResultData({
-            total: startResult.total,
-            dedupCount: startResult.total,
-            duplicates: 0,
-            formatInvalid: 0
-          }, result, { ruleTypeStats: result.ruleTypeStats || null }))
-          showWarning(`校验已取消，已保留 ${result.validCount} 条有效结果`)
-        } catch (err) {
-          progressData.value = null
-          showWarning('校验已取消')
-        } finally {
-          setValidating(false)
-        }
-      },
-      onError: (message) => {
-        setValidating(false)
-        showError(message)
-      }
-    })
-
-  } catch (err) {
-    stopValidation()
-    showError('搜索校验失败，请稍后重试')
-    setValidating(false)
-  }
-}
-
 // 处理下载
 function handleDownload() {
   if (!state.sourceData?.dedupedSources) return
@@ -670,111 +497,6 @@ async function handleExportToLegado() {
 
   openExternalUrl(exportInfo.legadoUrl)
   showInfo('已尝试唤起阅读 App；若未自动跳转，请确认已安装阅读，并尝试打开下方临时链接。')
-}
-
-function mergeRetryResult(data, skippedGroups = []) {
-  const previous = retryContext.value?.previous
-  if (!previous) return
-
-  const merged = mergeRetryResultData(previous, data, skippedGroups)
-  if (merged) setSourceData(merged)
-}
-
-async function handleRetryFailed(onlyNetwork) {
-  const { retrySources, skippedGroups } = collectFailedSources(state.sourceData, onlyNetwork)
-  if (retrySources.length === 0) {
-    showWarning(onlyNetwork ? '没有可重试的网络/超时失败项' : '没有可重试的失败项')
-    return
-  }
-
-  retryContext.value = {
-    previous: state.sourceData,
-    skippedGroups,
-    onlyNetwork,
-    isSearch: processMode.value === 'search'
-  }
-
-  setValidating(true)
-  progressData.value = {
-    processed: 0,
-    total: retrySources.length,
-    valid: 0,
-    invalid: 0,
-    current: '',
-    currentName: '',
-    estimatedRemaining: 0,
-    status: 'running'
-  }
-
-  try {
-    let startResult
-    if (processMode.value === 'search') {
-      startResult = await startSearchValidationFromData(
-        retrySources,
-        lastSearchConfig.value.keyword,
-        lastSearchConfig.value.validateType,
-        concurrency.value,
-        timeout.value,
-        validationMode.value
-      )
-    } else {
-      startResult = await startValidationFromData(
-        retrySources,
-        concurrency.value,
-        timeout.value,
-        validationMode.value
-      )
-    }
-
-    if (startResult.code !== 200) {
-      showError(startResult.message)
-      setValidating(false)
-      return
-    }
-
-    sessionId.value = startResult.sessionId
-
-    subscribeValidation({
-      label: '失败重试',
-      createSource: () => processMode.value === 'search'
-        ? getSearchProgressEventSource(sessionId.value)
-        : getProgressEventSource(sessionId.value),
-      initialProgress: { total: retrySources.length },
-      onCompleted: async () => {
-        try {
-          const result = await fetchValidationResult(sessionId.value)
-          mergeRetryResult(result, skippedGroups)
-          retryContext.value = null
-          showSuccess(`重试完成，新增/保留有效 ${result.validCount} 条，仍失败 ${result.invalidCount || 0} 条`)
-        } catch (err) {
-          showError('获取重试结果失败，请稍后重试')
-        } finally {
-          setValidating(false)
-        }
-      },
-      onCancelled: async () => {
-        try {
-          const result = await fetchValidationResult(sessionId.value)
-          mergeRetryResult(result, skippedGroups)
-          retryContext.value = null
-          showSuccess(`重试已取消，新增/保留有效 ${result.validCount} 条，仍失败 ${result.invalidCount || 0} 条`)
-        } catch (err) {
-          progressData.value = null
-          showWarning('重试已取消')
-        } finally {
-          setValidating(false)
-        }
-      },
-      onError: (message) => {
-        setValidating(false)
-        showError(message)
-      }
-    })
-  } catch (err) {
-    stopValidation()
-    setValidating(false)
-    showError('重试失败，请稍后再试')
-  }
 }
 
 // 导出失败书源

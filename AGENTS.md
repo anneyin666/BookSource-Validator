@@ -533,7 +533,21 @@ npm run preview
 
 详细文档：[SESSION_26](docs/sessions/SESSION_26_SINGLE_FLOW_SPLIT.md)
 
+### 会话 27 - 2026-10-18
+
+**主题**：前端收尾拆分（搜索/重试/结果区）
+
+**完成任务**：
+1. 新增 `useSearchValidation`，搜索/发现校验流程与最近配置内聚
+2. `useFailedRetry` 扩展重试会话编排（`handleRetryFailed`），纯逻辑保留可测
+3. 新增 `ResultPanel.vue`，统计/规则分布/失败详情/下载导出整块组件化
+4. App.vue 1251 → 974 行
+
+**验证**：前端 6 tests passed，构建成功，IDE 诊断 0 错误
+
+详细文档：[SESSION_27](docs/sessions/SESSION_27_FRONTEND_FINAL_SPLIT.md)
+
 ---
 
-文档版本：v2.1
+文档版本：v2.2
 最后更新：2026-10-18
