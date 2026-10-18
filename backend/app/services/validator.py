@@ -191,7 +191,7 @@ class ValidatorService:
                 timeout=timeout,
                 follow_redirects=True,
                 max_redirects=settings.MAX_REDIRECTS,
-                verify=False,
+                verify=settings.VERIFY_SSL,
                 limits=limits
             ) as request_client:
                 return await validate_with_client(request_client)
@@ -211,7 +211,7 @@ class ValidatorService:
             timeout=timeout,
             follow_redirects=True,
             max_redirects=settings.MAX_REDIRECTS,
-            verify=False,
+            verify=settings.VERIFY_SSL,
             limits=limits
         )
 

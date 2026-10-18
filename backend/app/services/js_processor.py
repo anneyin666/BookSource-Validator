@@ -8,6 +8,8 @@ import logging
 from typing import Optional, Tuple, Dict, Any
 from urllib.parse import quote, urlparse
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -323,6 +325,20 @@ class JSRuleProcessor:
                     result = f"{result}|{post_data}"
             return True, result, ""
 
+        # 执行保护：js2py 已停止维护，默认允许但可通过配置关闭；
+        # 超长代码（常见于混淆脚本）不进入执行路径。
+        if not settings.ENABLE_JS_EXECUTION:
+            url = JSRuleProcessor.extract_url_from_js(js_code, keyword, source_url)
+            if url:
+                return True, url, ""
+            return False, None, "JS执行已禁用"
+
+        if len(js_code) > settings.JS_MAX_CODE_LENGTH:
+            url = JSRuleProcessor.extract_url_from_js(js_code, keyword, source_url)
+            if url:
+                return True, url, ""
+            return False, None, "JS代码过长"
+
         # 尝试使用 js2py 执行
         try:
             import js2py
@@ -469,6 +485,11 @@ class JSRuleProcessor:
             (r'RSA|SHA256WithRSA', 'RSA加密'),
             (r'java\.webView', 'WebView动态渲染'),
             (r'java\.connect', '复杂网络请求'),
+            # 降低 js2py 沙箱被滥用的风险
+            (r'\brequire\s*\(', 'Node.js require'),
+            (r'\bpyimport\b', 'Python模块导入'),
+            (r'\beval\s*\(', 'eval动态执行'),
+            (r'new\s+Function\s*\(', 'Function构造器'),
         ]
 
         for pattern, feature_name in encryption_patterns:

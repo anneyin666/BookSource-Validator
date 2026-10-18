@@ -428,7 +428,22 @@ npm run preview
 
 详细文档：[SESSION_19](docs/sessions/SESSION_19_LOW_END_SERVER_OPTIMIZATION.md)
 
+### 会话 20 - 2026-10-18
+
+**主题**：P1 技术债清理
+
+**完成任务**：
+1. 新增核心服务单元测试 33 个（url_utils/deduper/parser/filter/validator/search_validator/url_security/js_processor），后端测试 19 → 52 passed
+2. 新增 `VERIFY_SSL` 配置（默认 false 保持兼容），validator/search_validator 统一接入
+3. JS 执行加固：`ENABLE_JS_EXECUTION` 开关、`JS_MAX_CODE_LENGTH` 上限、拦截 `require`/`pyimport`/`eval`/`new Function`
+
+**技术决策**：
+- `VERIFY_SSL` 默认关闭：书源站点证书异常普遍，默认开启会大面积误判
+- JS 执行保留但加保护，替换 js2py 留待后续评估
+
+详细文档：[SESSION_20](docs/sessions/SESSION_20_P1_TECH_DEBT.md)
+
 ---
 
-文档版本：v1.4
+文档版本：v1.5
 最后更新：2026-10-18

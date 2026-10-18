@@ -458,6 +458,13 @@
 
 深度校验与搜索校验的请求目标还会执行轻量检查（不做 DNS 解析）：拦截本地主机名与私网/回环字面量 IP。
 
+校验请求默认不校验证书（`VERIFY_SSL=false`），以兼容书源站点常见的过期/自签名证书；
+如需更高安全性，可在 `.env` 中设置 `VERIFY_SSL=true`（部分证书异常站点会被判为失效）。
+
+书源中的 JS 规则默认允许执行（`ENABLE_JS_EXECUTION=true`），但会拦截 `require` / `pyimport` /
+`eval` / `new Function` 等危险模式，并跳过超过 `JS_MAX_CODE_LENGTH` 的代码；
+对不可信书源可设置 `ENABLE_JS_EXECUTION=false`，只使用静态解析。
+
 ### 8.6 分组回写
 
 有效书源会保留原有分组，并追加：

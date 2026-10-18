@@ -7,6 +7,7 @@ from typing import List, Dict, Tuple, Optional
 from urllib.parse import quote
 import httpx
 
+from app.config import settings
 from app.services.js_processor import JSRuleProcessor
 from app.services.url_security import UrlSecurityService
 from app.services.validation_strategy import get_retry_delay
@@ -329,7 +330,7 @@ class SearchValidatorService:
                 async with httpx.AsyncClient(
                     timeout=timeout,
                     follow_redirects=True,
-                    verify=False,
+                    verify=settings.VERIFY_SSL,
                     http2=not use_http1,
                     http1=True
                 ) as client:

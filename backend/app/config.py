@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     # 最大重定向次数
     MAX_REDIRECTS: int = 5
 
+    # HTTPS 证书校验
+    # 书源站点常见证书过期/自签名，默认关闭以保持兼容；
+    # 设为 true 更安全，但证书异常的站点会被判为失败。
+    VERIFY_SSL: bool = False
+
+    # JS 规则执行（js2py）
+    # 设为 false 后仅使用静态解析，不执行书源中的 JS 代码（更安全）。
+    ENABLE_JS_EXECUTION: bool = True
+    JS_MAX_CODE_LENGTH: int = 20000  # 超过该长度的 JS 代码不执行
+
     model_config = SettingsConfigDict(env_file=".env")
 
 
