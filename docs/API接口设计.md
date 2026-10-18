@@ -107,8 +107,8 @@
 | `mode` | string | `dedup` 或 `full` |
 | `concurrency` | int | 并发数，范围 1-64，默认 16 |
 | `timeout` | int | 超时秒数，范围 5-120，默认 30 |
-| `validation_mode` | string | 预设：`fast` / `balanced` / `stable` / `custom`，默认 `custom` |
-| `smart_enabled` | bool | 是否启用智能调参，默认 `true` |
+| `validation_mode` | string | 预设：`turbo` / `fast` / `balanced` / `stable` / `custom`，默认 `custom` |
+| `smart_enabled` | bool | 是否启用智能调参，默认 `true`（`turbo` 预设会强制关闭） |
 | `filter_types` | string | 逗号分隔，如 `official,audio` |
 
 以上运行时参数（concurrency/timeout/validation_mode/smart_enabled）适用于所有校验类接口。

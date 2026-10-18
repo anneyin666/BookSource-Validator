@@ -46,6 +46,13 @@ TIMEOUT_REASONS = {
 }
 
 PRESET_OPTIONS = {
+    # 极速：高并发 + 短超时，并强制关闭智能降速，适合死源多的大批量清理
+    "turbo": {
+        "concurrency": 32,
+        "timeout": 15,
+        "max_retries": 1,
+        "smart": False,
+    },
     "fast": {"concurrency": 32, "timeout": 15, "max_retries": 1},
     "balanced": {"concurrency": 16, "timeout": 30, "max_retries": 2},
     "stable": {"concurrency": 8, "timeout": 45, "max_retries": 3},
@@ -159,6 +166,10 @@ def normalize_validation_options(
         }
     else:
         normalized_smart = bool(smart_enabled)
+
+    # 预设可强制覆盖智能调参（如 turbo 关闭降速）
+    if "smart" in preset:
+        normalized_smart = bool(preset["smart"])
 
     normalized_concurrency = max(
         MIN_CONCURRENCY,

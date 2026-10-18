@@ -4,6 +4,7 @@ from app.services.validation_strategy import (
     AdaptiveValidationController,
     ValidationOptions,
     is_retryable_reason,
+    normalize_validation_options,
 )
 
 
@@ -187,6 +188,21 @@ def test_custom_mode_never_drops_below_global_floor():
     )
 
     assert controller.current_concurrency == 4
+
+
+def test_turbo_preset_forces_high_concurrency_and_disables_smart():
+    """Turbo preset must ignore client overrides and disable adaptive slowdown."""
+    options = normalize_validation_options(
+        concurrency=8,
+        timeout=40,
+        mode="turbo",
+        smart_enabled=True,
+    )
+
+    assert options.concurrency == 32
+    assert options.timeout == 15
+    assert options.max_retries == 1
+    assert options.smart_enabled is False
 
 
 def test_httpx_protocol_and_timeout_names_are_retryable():

@@ -110,6 +110,7 @@ const progressTitle = computed(() => {
 const strategyLabel = computed(() => {
   if (!props.strategy) return ''
   const modeMap = {
+    turbo: '极速',
     fast: '快速',
     balanced: '均衡',
     stable: '稳定',

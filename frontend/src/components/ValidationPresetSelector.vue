@@ -25,6 +25,7 @@ defineProps({
 const emit = defineEmits(['update:modelValue', 'apply'])
 
 const presets = [
+  { value: 'turbo', label: '极速', hint: '32 / 15秒 · 不降速', concurrency: 32, timeout: 15 },
   { value: 'fast', label: '快速', hint: '32 / 15秒', concurrency: 32, timeout: 15 },
   { value: 'balanced', label: '均衡', hint: '16 / 30秒', concurrency: 16, timeout: 30 },
   { value: 'stable', label: '稳定', hint: '8 / 45秒', concurrency: 8, timeout: 45 },
