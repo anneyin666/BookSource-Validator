@@ -218,6 +218,8 @@ class AdaptiveValidationController:
             maxlen=SAMPLE_WINDOW_SIZE
         )
         self.evaluation_samples: list[ValidationSample] = []
+        # 最近一个评估窗口的超时占比，用于决定是否值得重试超时失败
+        self.last_timeout_rate = 0.0
 
     def record(
         self,
@@ -239,6 +241,26 @@ class AdaptiveValidationController:
         self.evaluation_samples = []
         return self._evaluate_window(evaluation_samples)
 
+    def should_retry_timeout(self) -> bool:
+        """超时失败是否值得重试。
+
+        样本足够且近期超时占比过半时，通常说明这是一批死源，
+        重试只会让每条再白等一个超时。
+        """
+        if self.last_timeout_rate >= 0.5:
+            return False
+
+        if len(self.samples) >= 8:
+            timeout_count = sum(
+                1
+                for sample in self.samples
+                if not sample.is_valid and is_timeout_reason(sample.reason)
+            )
+            if timeout_count / len(self.samples) >= 0.5:
+                return False
+
+        return True
+
     def _evaluate_window(
         self,
         samples: list[ValidationSample],
@@ -259,13 +281,27 @@ class AdaptiveValidationController:
         p75_duration = durations[p75_index]
         network_error_rate = len(network_failures) / len(samples)
         timeout_rate = len(timeout_failures) / len(samples)
+        self.last_timeout_rate = timeout_rate
+
+        # 只有出现"成功样本"或"连接类失败"时才认为可能是网络压力。
+        # 全超时的窗口更可能是死源，降低并发只会让清理更慢。
+        has_success = any(sample.is_valid for sample in samples)
+        has_connect_failure = any(
+            not sample.is_valid
+            and is_retryable_reason(sample.reason)
+            and not is_timeout_reason(sample.reason)
+            for sample in samples
+        )
 
         should_reduce = (
-            network_error_rate >= 0.35
-            or timeout_rate >= 0.25
-            or (
-                network_error_rate > 0
-                and p75_duration >= self.current_timeout * 0.8
+            (has_success or has_connect_failure)
+            and (
+                network_error_rate >= 0.35
+                or timeout_rate >= 0.25
+                or (
+                    network_error_rate > 0
+                    and p75_duration >= self.current_timeout * 0.8
+                )
             )
         )
         is_healthy = (

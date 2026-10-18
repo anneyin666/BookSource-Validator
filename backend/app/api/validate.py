@@ -24,6 +24,7 @@ from app.services.validation_strategy import (
     ValidationOptions,
     get_retry_delay,
     is_retryable_reason,
+    is_timeout_reason,
 )
 
 router = APIRouter()
@@ -263,8 +264,18 @@ async def get_validation_progress(session_id: str):
                                     adjustment.reason,
                                 )
 
+                        # 超时占比很高的批次（多为死源）不再重试超时，
+                        # 否则每条死源要白等两轮超时。
+                        retryable = is_retryable_reason(reason)
+                        if (
+                            retryable
+                            and is_timeout_reason(reason)
+                            and not controller.should_retry_timeout()
+                        ):
+                            retryable = False
+
                         scheduled_retry = False
-                        if not is_valid and is_retryable_reason(reason):
+                        if not is_valid and retryable:
                             if work_item.attempt == 0:
                                 session.primary_network_failures += 1
                             scheduled_retry = work_queue.schedule_retry(

@@ -85,9 +85,9 @@ def test_first_unhealthy_window_reduces_only_once():
     adjustments = record_window(
         controller,
         count=16,
-        duration=29,
+        duration=2,
         is_valid=False,
-        reason="超时",
+        reason="连接失败",
     )
 
     assert len(adjustments) == 1
@@ -103,12 +103,28 @@ def test_balanced_mode_never_drops_below_eight():
     record_window(
         controller,
         count=64,
+        duration=2,
+        is_valid=False,
+        reason="连接失败",
+    )
+
+    assert controller.current_concurrency == 8
+
+
+def test_timeout_only_window_keeps_concurrency():
+    """All-timeout windows usually mean dead sources; do not throttle."""
+    controller = build_controller()
+
+    record_window(
+        controller,
+        count=64,
         duration=29,
         is_valid=False,
         reason="超时",
     )
 
-    assert controller.current_concurrency == 8
+    assert controller.current_concurrency == 16
+    assert controller.last_timeout_rate == 1.0
 
 
 def test_healthy_windows_restore_two_concurrency_at_a_time():
@@ -117,9 +133,9 @@ def test_healthy_windows_restore_two_concurrency_at_a_time():
     record_window(
         controller,
         count=32,
-        duration=29,
+        duration=2,
         is_valid=False,
-        reason="超时",
+        reason="连接失败",
     )
     assert controller.current_concurrency == 9
 
@@ -187,9 +203,9 @@ def test_custom_mode_never_drops_below_global_floor():
     record_window(
         controller,
         count=64,
-        duration=29,
+        duration=2,
         is_valid=False,
-        reason="超时",
+        reason="连接失败",
     )
 
     assert controller.current_concurrency == 4
@@ -223,6 +239,23 @@ def test_unknown_mode_keeps_client_values_instead_of_preset():
     assert options.concurrency == 48
     assert options.timeout == 12
     assert options.smart_enabled is False
+
+
+def test_should_retry_timeout_for_isolated_failure():
+    """A single timeout at batch start is still worth retrying."""
+    controller = build_controller()
+    controller.record(duration=29, is_valid=False, reason="超时")
+
+    assert controller.should_retry_timeout() is True
+
+
+def test_should_not_retry_timeout_when_most_samples_time_out():
+    """Timeout-heavy batches should skip retries to avoid doubling dead-source cost."""
+    controller = build_controller()
+    for _ in range(8):
+        controller.record(duration=29, is_valid=False, reason="超时")
+
+    assert controller.should_retry_timeout() is False
 
 
 def test_httpx_protocol_and_timeout_names_are_retryable():

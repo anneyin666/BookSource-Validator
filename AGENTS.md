@@ -611,7 +611,20 @@ npm run preview
 
 详细文档：[SESSION_32](docs/sessions/SESSION_32_ETA_AND_BACKEND_CHECK.md)
 
+### 会话 33 - 2026-10-18
+
+**主题**：死源批次的自适应策略修正
+
+**完成任务**：
+1. 全超时窗口不再降并发（仅在有成功样本或连接类失败时降）
+2. 超时占比过半时不再重试超时（`should_retry_timeout`）
+3. 实测 16 条死源：快速 40.5s、极速 10.3s（旧逻辑 60-120s）
+
+**验证**：后端 62 passed
+
+详细文档：[SESSION_33](docs/sessions/SESSION_33_DEAD_BATCH_ADAPTATION.md)
+
 ---
 
-文档版本：v2.7
+文档版本：v2.8
 最后更新：2026-10-18
