@@ -200,8 +200,8 @@ def test_turbo_preset_forces_high_concurrency_and_disables_smart():
     )
 
     assert options.concurrency == 32
-    assert options.timeout == 15
-    assert options.max_retries == 1
+    assert options.timeout == 10
+    assert options.max_retries == 0
     assert options.smart_enabled is False
 
 

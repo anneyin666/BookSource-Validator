@@ -150,7 +150,9 @@ def build_strategy_payload(session) -> dict:
         "smartEnabled": session.smart_enabled,
         "phase": session.validation_phase,
         "currentConcurrency": session.current_concurrency,
+        "maxConcurrency": session.concurrency,
         "currentTimeout": session.current_timeout,
+        "baseTimeout": session.timeout,
     }
 
 

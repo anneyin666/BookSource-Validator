@@ -46,11 +46,12 @@ TIMEOUT_REASONS = {
 }
 
 PRESET_OPTIONS = {
-    # 极速：高并发 + 短超时，并强制关闭智能降速，适合死源多的大批量清理
+    # 极速：高并发 + 短超时 + 不重试，并强制关闭智能降速，
+    # 适合死源多的大批量快速清理。
     "turbo": {
         "concurrency": 32,
-        "timeout": 15,
-        "max_retries": 1,
+        "timeout": 10,
+        "max_retries": 0,
         "smart": False,
     },
     "fast": {"concurrency": 32, "timeout": 15, "max_retries": 1},

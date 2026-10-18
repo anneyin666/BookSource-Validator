@@ -24,6 +24,10 @@
       </span>
     </div>
 
+    <div class="throttle-hint" v-if="throttleHint">
+      ⚠️ {{ throttleHint }}
+    </div>
+
     <div class="progress-current" v-if="currentUrl || currentName">
       <span class="current-label">当前:</span>
       <span class="current-name" v-if="currentName">{{ truncateText(currentName, 20) }}</span>
@@ -126,6 +130,18 @@ const strategyLabel = computed(() => {
   return `${mode}${phaseText} · ${props.strategy.currentConcurrency || '-'}并发 · ${props.strategy.currentTimeout || '-'}秒`
 })
 
+// 智能策略降速提示：并发低于初始值或超时高于初始值时提示切换极速
+const throttleHint = computed(() => {
+  const s = props.strategy
+  if (!s || !s.smartEnabled) return ''
+
+  const reduced = (s.maxConcurrency || 0) > 0 && s.currentConcurrency < s.maxConcurrency
+  const increased = (s.baseTimeout || 0) > 0 && s.currentTimeout > s.baseTimeout
+  if (!reduced && !increased) return ''
+
+  return `智能策略已自动降速（${s.currentConcurrency} 并发 / ${s.currentTimeout} 秒）。死源较多时建议切换“极速”预设`
+})
+
 function truncateUrl(url) {
   if (!url) return ''
   if (url.length > 40) {
@@ -213,6 +229,17 @@ function formatTime(seconds) {
 
 .stat-item.strategy {
   color: #bbf7d0;
+}
+
+.throttle-hint {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  background: rgba(230, 162, 60, 0.12);
+  border: 1px solid rgba(230, 162, 60, 0.35);
+  border-radius: 6px;
+  font-size: 12px;
+  color: #b88230;
+  line-height: 1.5;
 }
 
 .progress-current {
