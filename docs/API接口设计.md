@@ -77,7 +77,7 @@
 | `deepInvalid` | 深度校验失效数量 |
 | `validCount` | 最终有效数量 |
 | `dedupedSources` | 最终有效书源数组 |
-| `failedGroups` | 失败详情，按原因分组 |
+| `failedGroups` | 失败详情，按原因分组（每组含 `category`：fixable/unfixable/checkable） |
 | `fileStats` | 批量文件来源统计 |
 | `urlStats` | 批量 URL 来源统计 |
 

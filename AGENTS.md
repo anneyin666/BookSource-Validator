@@ -443,7 +443,25 @@ npm run preview
 
 详细文档：[SESSION_20](docs/sessions/SESSION_20_P1_TECH_DEBT.md)
 
+### 会话 21 - 2026-10-18
+
+**主题**：P2 结构性债务（第一批）
+
+**完成任务**：
+1. 新增 `app/api/helpers.py`，从 sources.py 迁出 9 个共享工具函数
+2. 新增 `app/api/ingest.py`，统一单文件/批量文件/单链接/批量链接的读取逻辑
+3. `process_sources` 改为接收已提取的书源列表；sources.py 1950 → 1545 行
+4. `failedGroups` 增加 `category` 字段，前端重试改用分类判断（保留关键词兜底）
+5. `main.py` 迁移到 lifespan，消除 on_event 弃用警告
+
+**待办**：
+- 路由整体拆分（parse/validate/search/export 四个 router）
+- App.vue 继续拆分（导入导出、失败重试、批量编排）
+- 搜索校验接入动态调度器（需补 SSE 测试）
+
+详细文档：[SESSION_21](docs/sessions/SESSION_21_P2_STRUCTURAL_DEBT.md)
+
 ---
 
-文档版本：v1.5
+文档版本：v1.6
 最后更新：2026-10-18

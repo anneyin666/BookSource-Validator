@@ -1,5 +1,6 @@
 # FastAPI应用入口
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,29 +16,26 @@ logger = get_logger(__name__)
 
 from app.api import router
 
-# 创建应用
-app = FastAPI(
-    title="阅读书源去重校验工具 API",
-    description="开源阅读 App 书源文件处理工具 - 支持去重、格式校验、深度校验",
-    version="1.0.0"
-)
-
-
-@app.on_event("startup")
-async def log_startup_event():
-    """Record service startup information."""
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """应用生命周期：记录启动与关闭信息。"""
     logger.info(
         "服务启动: app=%s debug=%s log_file=%s",
         settings.APP_NAME,
         settings.DEBUG,
         LOG_FILE_PATH,
     )
-
-
-@app.on_event("shutdown")
-async def log_shutdown_event():
-    """Record service shutdown information."""
+    yield
     logger.info("服务关闭")
+
+
+# 创建应用
+app = FastAPI(
+    title="阅读书源去重校验工具 API",
+    description="开源阅读 App 书源文件处理工具 - 支持去重、格式校验、深度校验",
+    version="1.0.0",
+    lifespan=lifespan,
+)
 
 
 @app.middleware("http")

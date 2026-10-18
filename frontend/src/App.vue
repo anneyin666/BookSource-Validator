@@ -1090,6 +1090,14 @@ function isNetworkRetryReason(reason) {
   return keywords.some((keyword) => String(reason || '').includes(keyword))
 }
 
+// 优先使用后端返回的失败分类；旧数据回退到关键词匹配
+function isRetryableGroup(group) {
+  if (group?.category) {
+    return group.category === 'fixable'
+  }
+  return isNetworkRetryReason(group?.reason)
+}
+
 function normalizeFailedSource(source) {
   const bookSourceUrl = source.bookSourceUrl || source.url || ''
   if (!bookSourceUrl) return null
@@ -1106,7 +1114,7 @@ function collectFailedSources(onlyNetwork) {
   const skippedGroups = []
 
   for (const group of groups) {
-    const shouldRetry = !onlyNetwork || isNetworkRetryReason(group.reason)
+    const shouldRetry = !onlyNetwork || isRetryableGroup(group)
     if (!shouldRetry) {
       skippedGroups.push(group)
       continue

@@ -1,5 +1,4 @@
 # 书源解析路由
-from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
@@ -10,6 +9,19 @@ import asyncio
 import time
 import logging
 
+from app.api.helpers import (
+    append_failed_source,
+    build_empty_source_data,
+    build_session_result,
+    build_strategy_payload,
+    normalize_export_filename,
+    validate_runtime_options,
+)
+from app.api.ingest import (
+    collect_sources_from_files,
+    collect_sources_from_urls,
+    load_sources_from_upload,
+)
 from app.models import (
     UrlParseRequest,
     ParseResponse,
@@ -21,7 +33,6 @@ from app.models import (
 from app.services import ParserService, DeduperService, ValidatorService, FilterService
 from app.services.export_store import export_store
 from app.services.session_manager import session_manager
-from app.services.search_validator import categorize_failed_sources
 from app.services.url_security import UrlSecurityService
 from app.services.validation_scheduler import AdaptiveWorkQueue
 from app.services.validation_strategy import (
@@ -29,7 +40,6 @@ from app.services.validation_strategy import (
     ValidationOptions,
     get_retry_delay,
     is_retryable_reason,
-    normalize_validation_options,
 )
 from app.config import settings
 
@@ -37,187 +47,6 @@ router = APIRouter()
 
 logger = logging.getLogger(__name__)
 SLOW_VALIDATION_SECONDS = 5 * 60
-
-
-def calculate_rule_type_stats(valid_sources: List[dict], failed_sources: dict) -> dict:
-    """
-    计算规则类型统计
-
-    Args:
-        valid_sources: 有效书源列表
-        failed_sources: 失败书源字典
-
-    Returns:
-        规则类型统计字典
-    """
-    stats = {
-        'searchOnly': {'valid': 0, 'invalid': 0, 'total': 0},
-        'exploreOnly': {'valid': 0, 'invalid': 0, 'total': 0},
-        'both': {'valid': 0, 'invalid': 0, 'total': 0},
-        'none': {'valid': 0, 'invalid': 0, 'total': 0}
-    }
-
-    # 统计有效书源
-    for source in valid_sources:
-        rule_type = source.get('_ruleType', '未知')
-        if rule_type == '仅搜索':
-            stats['searchOnly']['valid'] += 1
-            stats['searchOnly']['total'] += 1
-        elif rule_type == '仅发现':
-            stats['exploreOnly']['valid'] += 1
-            stats['exploreOnly']['total'] += 1
-        elif rule_type == '搜索+发现':
-            stats['both']['valid'] += 1
-            stats['both']['total'] += 1
-
-    # 统计失败书源
-    for reason, sources_list in failed_sources.items():
-        for source in sources_list:
-            rule_type = source.get('_ruleType', '未知')
-            if reason == '无规则':
-                stats['none']['invalid'] += 1
-                stats['none']['total'] += 1
-            elif rule_type == '仅搜索':
-                stats['searchOnly']['invalid'] += 1
-                stats['searchOnly']['total'] += 1
-            elif rule_type == '仅发现':
-                stats['exploreOnly']['invalid'] += 1
-                stats['exploreOnly']['total'] += 1
-            elif rule_type == '搜索+发现':
-                stats['both']['invalid'] += 1
-                stats['both']['total'] += 1
-            elif rule_type == '无规则':
-                stats['none']['invalid'] += 1
-                stats['none']['total'] += 1
-            else:
-                # 根据原因判断类型
-                if '无搜索规则' in reason:
-                    stats['exploreOnly']['invalid'] += 1
-                    stats['exploreOnly']['total'] += 1
-                elif '无发现规则' in reason:
-                    stats['searchOnly']['invalid'] += 1
-                    stats['searchOnly']['total'] += 1
-                else:
-                    # 默认归类
-                    stats['both']['invalid'] += 1
-                    stats['both']['total'] += 1
-
-    return stats
-
-
-def is_valid_source_file(filename: str) -> bool:
-    """检查是否是有效的书源文件格式（.json 或 .txt）"""
-    if not filename:
-        return False
-    lower_name = filename.lower()
-    return lower_name.endswith('.json') or lower_name.endswith('.txt')
-
-
-def validate_runtime_options(
-    concurrency,
-    timeout,
-    validation_mode: str = "custom",
-    smart_enabled=True,
-) -> ValidationOptions:
-    """校验并归一化运行时参数。"""
-    return normalize_validation_options(
-        concurrency=concurrency,
-        timeout=timeout,
-        mode=validation_mode,
-        smart_enabled=smart_enabled,
-    )
-
-
-def append_failed_source(failed_sources: dict, reason: str, source: dict, url: str, name: str) -> None:
-    """Append a failed source while preserving original source fields for retry/export."""
-    if reason not in failed_sources:
-        failed_sources[reason] = []
-    failed_source = source.copy()
-    failed_source.update({
-        "url": url,
-        "name": name,
-        "reason": reason,
-        "_failureReason": reason,
-    })
-    failed_sources[reason].append(failed_source)
-
-
-def build_failed_groups(failed_sources: dict) -> list:
-    """Build sorted failed groups from reason-indexed failed sources."""
-    failed_groups = []
-    for reason, sources_list in failed_sources.items():
-        failed_groups.append({
-            "reason": reason,
-            "count": len(sources_list),
-            "sources": sources_list
-        })
-    failed_groups.sort(key=lambda x: x["count"], reverse=True)
-    return failed_groups
-
-
-def build_strategy_payload(session) -> dict:
-    """构造校验策略快照，供 SSE 进度与结果接口复用。"""
-    return {
-        "mode": session.validation_mode,
-        "smartEnabled": session.smart_enabled,
-        "phase": session.validation_phase,
-        "currentConcurrency": session.current_concurrency,
-        "currentTimeout": session.current_timeout,
-    }
-
-
-def build_session_result(session) -> dict:
-    """构造完整校验结果（供结果接口使用，含书源明细）。"""
-    valid_sources = session.valid_sources
-    failed_sources = session.failed_sources
-    failed_groups = build_failed_groups(failed_sources)
-    invalid_count = sum(len(items) for items in failed_sources.values())
-
-    result = {
-        "status": session.status,
-        "total": session.total,
-        "dedupCount": session.dedup_count if session.dedup_count else session.total,
-        "duplicates": session.duplicates,
-        "formatInvalid": session.format_invalid,
-        "totalOriginal": session.total_original if session.total_original else session.total,
-        "validCount": len(valid_sources),
-        "invalidCount": invalid_count,
-        "validSources": valid_sources,
-        "failedGroups": failed_groups,
-        "failedCategories": categorize_failed_sources(failed_groups),
-        "fileStats": session.file_stats,
-        "urlStats": session.url_stats,
-        "strategy": build_strategy_payload(session),
-    }
-    if session.is_search:
-        result["ruleTypeStats"] = calculate_rule_type_stats(valid_sources, failed_sources)
-    return result
-
-
-def build_empty_source_data(*, file_stats=None, url_stats=None) -> SourceData:
-    """构造空结果，避免错误分支触发响应模型校验失败。"""
-    return SourceData(
-        total=0,
-        dedupCount=0,
-        duplicates=0,
-        duplicateUrls=[],
-        formatInvalid=0,
-        deepInvalid=None,
-        validCount=0,
-        dedupedSources=[],
-        fileStats=file_stats,
-        urlStats=url_stats
-    )
-
-
-def normalize_export_filename(filename: str) -> str:
-    """标准化导出文件名。"""
-    safe_name = Path(filename or "").name.strip()
-    if not safe_name:
-        safe_name = "阅读书源_去重有效.json"
-    if not safe_name.lower().endswith(".json"):
-        safe_name = f"{safe_name}.json"
-    return safe_name
 
 
 @router.post("/parse/file", response_model=ParseResponse)
@@ -247,30 +76,16 @@ async def parse_file(
     except ValueError as exc:
         return ParseResponse(code=400, message=str(exc))
 
-    # 1. 验证文件
-    if not is_valid_source_file(file.filename):
-        return ParseResponse(code=400, message="仅支持 JSON 或 TXT 格式文件")
+    # 1. 读取并解析文件
+    sources, error_message = await load_sources_from_upload(file)
+    if error_message:
+        return ParseResponse(code=400, message=error_message)
 
-    # 2. 检查文件大小
-    content = await file.read()
-    if len(content) > settings.MAX_FILE_SIZE:
-        return ParseResponse(code=400, message=f"文件大小超过限制（最大{settings.MAX_FILE_SIZE // 1024 // 1024}MB）")
-
-    # 3. 解析 JSON
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError as e:
-        return ParseResponse(code=400, message=f"JSON 解析失败：{str(e)}")
-
-    # 4. 验证数据结构
-    if not ParserService.validate_json_structure(data):
-        return ParseResponse(code=400, message="书源数据格式不正确")
-
-    # 5. 解析过滤类型
+    # 2. 解析过滤类型
     filter_list = [f.strip() for f in filter_types.split(',') if f.strip()] if filter_types else []
 
-    # 6. 处理书源
-    result = await process_sources(data, mode, options, filter_list)
+    # 3. 处理书源
+    result = await process_sources(sources, mode, options, filter_list)
     return ParseResponse(data=result)
 
 
@@ -318,15 +133,16 @@ async def parse_url(request: UrlParseRequest):
     except Exception as e:
         return ParseResponse(code=502, message=f"获取远程数据失败：{str(e)}")
 
-    # 3. 验证数据结构
+    # 3. 验证数据结构并提取书源
     if not ParserService.validate_json_structure(data):
         return ParseResponse(code=400, message="书源数据格式不正确")
+    sources = ParserService.extract_sources(data)
 
     # 4. 解析过滤类型
     filter_list = request.filter_types.split(',') if request.filter_types else []
 
     # 5. 处理书源
-    result = await process_sources(data, request.mode, options, filter_list)
+    result = await process_sources(sources, request.mode, options, filter_list)
     return ParseResponse(data=result)
 
 
@@ -378,7 +194,7 @@ async def download_exported_book_source(export_id: str):
 
 
 async def process_sources(
-    data,
+    sources: List[dict],
     mode: str = "dedup",
     options: Optional[ValidationOptions] = None,
     filter_types: list = None,
@@ -387,10 +203,9 @@ async def process_sources(
     处理书源数据
 
     Args:
-        data: 解析后的JSON数据
+        sources: 已提取的书源列表
         mode: 操作模式
-        concurrency: 深度校验并发数
-        timeout: 深度校验超时时间
+        options: 归一化后的校验参数
         filter_types: 过滤类型列表
 
     Returns:
@@ -402,10 +217,8 @@ async def process_sources(
         options = validate_runtime_options(16, 30)
     started_at = time.perf_counter()
 
-    # 步骤1：提取书源数组
-    sources = ParserService.extract_sources(data)
     total = len(sources)
-    logger.info(f"提取书源数量: {total}")
+    logger.info(f"处理书源数量: {total}")
 
     # 打印前5个书源的URL用于调试
     for i, s in enumerate(sources[:5]):
@@ -496,30 +309,15 @@ async def start_validation(
     except ValueError as exc:
         return {"code": 400, "message": str(exc)}
 
-    # 1. 验证文件
-    if not is_valid_source_file(file.filename):
-        return {"code": 400, "message": "仅支持 JSON 或 TXT 格式文件"}
+    # 1. 读取并解析文件
+    sources, error_message = await load_sources_from_upload(file)
+    if error_message:
+        return {"code": 400, "message": error_message}
 
-    # 2. 检查文件大小
-    content = await file.read()
-    if len(content) > settings.MAX_FILE_SIZE:
-        return {"code": 400, "message": f"文件大小超过限制"}
-
-    # 3. 解析 JSON
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError as e:
-        return {"code": 400, "message": f"JSON 解析失败：{str(e)}"}
-
-    # 4. 验证数据结构
-    if not ParserService.validate_json_structure(data):
-        return {"code": 400, "message": "书源数据格式不正确"}
-
-    # 5. 解析过滤类型
+    # 2. 解析过滤类型
     filter_list = [f.strip() for f in filter_types.split(',') if f.strip()] if filter_types else []
 
-    # 6. 处理书源（去重 + 格式校验 + 类型过滤）
-    sources = ParserService.extract_sources(data)
+    # 3. 处理书源（去重 + 格式校验 + 类型过滤）
     deduped, duplicates, duplicate_urls = DeduperService.dedupe(sources)
 
     # 类型过滤
@@ -1031,33 +829,7 @@ async def start_batch_files_validation(
     except ValueError as exc:
         return {"code": 400, "message": str(exc)}
 
-    all_sources = []
-    file_stats = []
-
-    for file in files:
-        if not is_valid_source_file(file.filename):
-            file_stats.append({"name": file.filename or "unknown", "valid": False, "error": "仅支持JSON/TXT格式"})
-            continue
-
-        content = await file.read()
-        if len(content) > settings.MAX_FILE_SIZE:
-            file_stats.append({"name": file.filename, "valid": False, "error": "文件过大"})
-            continue
-
-        try:
-            data = json.loads(content)
-            if not ParserService.validate_json_structure(data):
-                file_stats.append({"name": file.filename, "valid": False, "error": "格式不正确"})
-                continue
-
-            sources = ParserService.extract_sources(data)
-            all_sources.extend(sources)
-            file_stats.append({"name": file.filename, "valid": True, "count": len(sources)})
-
-        except json.JSONDecodeError as e:
-            file_stats.append({"name": file.filename, "valid": False, "error": f"JSON解析失败"})
-        except Exception as e:
-            file_stats.append({"name": file.filename, "valid": False, "error": str(e)})
+    all_sources, file_stats = await collect_sources_from_files(files)
 
     if not all_sources:
         return {"code": 400, "message": "没有有效的书源数据", "fileStats": file_stats}
@@ -1145,42 +917,7 @@ async def start_batch_urls_validation(request: dict):
     if not urls:
         return {"code": 400, "message": "URL列表为空"}
 
-    all_sources = []
-    url_stats = []
-
-    import httpx
-    async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT) as client:
-        for url in urls:
-            if not url.startswith(('http://', 'https://')):
-                url_stats.append({"url": url, "valid": False, "error": "无效URL"})
-                continue
-
-            is_safe, error_message = await UrlSecurityService.is_safe_remote_url(url)
-            if not is_safe:
-                url_stats.append({"url": url, "valid": False, "error": error_message})
-                continue
-
-            try:
-                response = await client.get(url)
-                response.raise_for_status()
-                data = response.json()
-
-                if not ParserService.validate_json_structure(data):
-                    url_stats.append({"url": url, "valid": False, "error": "格式不正确"})
-                    continue
-
-                sources = ParserService.extract_sources(data)
-                all_sources.extend(sources)
-                url_stats.append({"url": url, "valid": True, "count": len(sources)})
-
-            except httpx.TimeoutException:
-                url_stats.append({"url": url, "valid": False, "error": "连接超时"})
-            except httpx.HTTPStatusError as e:
-                url_stats.append({"url": url, "valid": False, "error": f"HTTP {e.response.status_code}"})
-            except json.JSONDecodeError:
-                url_stats.append({"url": url, "valid": False, "error": "响应不是有效JSON"})
-            except Exception as e:
-                url_stats.append({"url": url, "valid": False, "error": str(e)})
+    all_sources, url_stats = await collect_sources_from_urls(urls)
 
     if not all_sources:
         return {"code": 400, "message": "没有有效的书源数据", "urlStats": url_stats}
@@ -1266,37 +1003,7 @@ async def parse_batch_files(
     except ValueError as exc:
         return ParseResponse(code=400, message=str(exc))
 
-    all_sources = []
-    file_stats = []
-
-    for file in files:
-        # 验证文件
-        if not is_valid_source_file(file.filename):
-            file_stats.append({"name": file.filename or "unknown", "valid": False, "error": "仅支持JSON/TXT格式"})
-            continue
-
-        # 检查文件大小
-        content = await file.read()
-        if len(content) > settings.MAX_FILE_SIZE:
-            file_stats.append({"name": file.filename, "valid": False, "error": "文件过大"})
-            continue
-
-        # 解析 JSON
-        try:
-            data = json.loads(content)
-            if not ParserService.validate_json_structure(data):
-                file_stats.append({"name": file.filename, "valid": False, "error": "格式不正确"})
-                continue
-
-            sources = ParserService.extract_sources(data)
-            all_sources.extend(sources)
-            file_stats.append({"name": file.filename, "valid": True, "count": len(sources)})
-            logger.info(f"文件 {file.filename}: {len(sources)} 条书源")
-
-        except json.JSONDecodeError as e:
-            file_stats.append({"name": file.filename, "valid": False, "error": f"JSON解析失败: {str(e)}"})
-        except Exception as e:
-            file_stats.append({"name": file.filename, "valid": False, "error": str(e)})
+    all_sources, file_stats = await collect_sources_from_files(files)
 
     if not all_sources:
         return ParseResponse(
@@ -1309,7 +1016,7 @@ async def parse_batch_files(
     filter_list = [f.strip() for f in filter_types.split(',') if f.strip()] if filter_types else []
 
     # 处理合并后的书源
-    result = await process_sources({"sources": all_sources}, mode, options, filter_list)
+    result = await process_sources(all_sources, mode, options, filter_list)
 
     # 添加文件统计信息
     result.fileStats = file_stats
@@ -1342,44 +1049,7 @@ async def parse_batch_urls(request: dict):
     if not urls:
         return ParseResponse(code=400, message="URL列表为空")
 
-    all_sources = []
-    url_stats = []
-
-    import httpx
-    async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT) as client:
-        for url in urls:
-            # 验证 URL
-            if not url.startswith(('http://', 'https://')):
-                url_stats.append({"url": url, "valid": False, "error": "无效URL"})
-                continue
-
-            is_safe, error_message = await UrlSecurityService.is_safe_remote_url(url)
-            if not is_safe:
-                url_stats.append({"url": url, "valid": False, "error": error_message})
-                continue
-
-            try:
-                response = await client.get(url)
-                response.raise_for_status()
-                data = response.json()
-
-                if not ParserService.validate_json_structure(data):
-                    url_stats.append({"url": url, "valid": False, "error": "格式不正确"})
-                    continue
-
-                sources = ParserService.extract_sources(data)
-                all_sources.extend(sources)
-                url_stats.append({"url": url, "valid": True, "count": len(sources)})
-                logger.info(f"URL {url}: {len(sources)} 条书源")
-
-            except httpx.TimeoutException:
-                url_stats.append({"url": url, "valid": False, "error": "连接超时"})
-            except httpx.HTTPStatusError as e:
-                url_stats.append({"url": url, "valid": False, "error": f"HTTP {e.response.status_code}"})
-            except json.JSONDecodeError:
-                url_stats.append({"url": url, "valid": False, "error": "响应不是有效JSON"})
-            except Exception as e:
-                url_stats.append({"url": url, "valid": False, "error": str(e)})
+    all_sources, url_stats = await collect_sources_from_urls(urls)
 
     if not all_sources:
         return ParseResponse(
@@ -1392,7 +1062,7 @@ async def parse_batch_urls(request: dict):
     filter_list = filter_types.split(',') if filter_types else []
 
     # 处理合并后的书源
-    result = await process_sources({"sources": all_sources}, mode, options, filter_list)
+    result = await process_sources(all_sources, mode, options, filter_list)
 
     # 添加URL统计信息
     result.urlStats = url_stats
@@ -1433,40 +1103,15 @@ async def start_search_validation(
     except ValueError as exc:
         return {"code": 400, "message": str(exc)}
 
-    # 1. 验证文件
-    if not is_valid_source_file(file.filename):
-        logger.warning(f"[搜索校验] 文件格式无效: {file.filename}")
-        return {"code": 400, "message": "仅支持 JSON 或 TXT 格式文件"}
+    # 1. 读取并解析文件
+    sources, error_message = await load_sources_from_upload(file)
+    if error_message:
+        logger.warning("[搜索校验] 文件读取失败: %s", error_message)
+        return {"code": 400, "message": error_message}
 
-    logger.info(f"[搜索校验] 步骤1: 文件格式验证通过")
+    logger.info("[搜索校验] 文件解析完成, 书源数量: %s", len(sources))
 
-    # 2. 读取文件
-    content = await file.read()
-    logger.info(f"[搜索校验] 步骤2: 文件读取完成, 大小: {len(content)} bytes")
-
-    if len(content) > settings.MAX_FILE_SIZE:
-        return {"code": 400, "message": "文件大小超过限制"}
-
-    # 3. 解析 JSON
-    try:
-        data = json.loads(content)
-        logger.info(f"[搜索校验] 步骤3: JSON解析成功")
-    except json.JSONDecodeError as e:
-        logger.error(f"[搜索校验] JSON解析失败: {e}")
-        return {"code": 400, "message": f"JSON 解析失败：{str(e)}"}
-
-    # 4. 验证数据结构
-    if not ParserService.validate_json_structure(data):
-        logger.error(f"[搜索校验] 数据结构验证失败")
-        return {"code": 400, "message": "书源数据格式不正确"}
-
-    logger.info(f"[搜索校验] 步骤4: 数据结构验证通过")
-
-    # 5. 提取书源
-    sources = ParserService.extract_sources(data)
-    logger.info(f"[搜索校验] 步骤5: 提取书源完成, 数量: {len(sources)}")
-
-    # 6. 创建会话
+    # 2. 创建会话
     session_id = await session_manager.create_session(
         sources,
         options.concurrency,
