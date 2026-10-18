@@ -172,7 +172,7 @@ shuyuanquchong/
 ## 关键入口
 
 - 后端入口：[backend/app/main.py](backend/app/main.py)
-- 核心路由：[backend/app/api/sources.py](backend/app/api/sources.py)
+- 核心路由：[backend/app/api/](backend/app/api/)（parse / validate / search / export）
 - 前端入口：[frontend/src/App.vue](frontend/src/App.vue)
 - 前端状态：[frontend/src/composables/useSources.js](frontend/src/composables/useSources.js)
 - 前端 API：[frontend/src/api/sources.js](frontend/src/api/sources.js)

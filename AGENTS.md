@@ -183,7 +183,7 @@ npm run preview
 |------|------|
 | `backend/app/main.py` | FastAPI 应用入口 |
 | `backend/app/config.py` | 配置管理 |
-| `backend/app/api/sources.py` | 书源解析 API |
+| `backend/app/api/parse.py` / `validate.py` / `search.py` / `export.py` | 按业务拆分的路由 |
 | `backend/app/services/deduper.py` | 去重服务 |
 | `backend/app/services/validator.py` | 校验服务 |
 | `backend/app/models/response.py` | 响应数据模型 |
@@ -461,7 +461,21 @@ npm run preview
 
 详细文档：[SESSION_21](docs/sessions/SESSION_21_P2_STRUCTURAL_DEBT.md)
 
+### 会话 22 - 2026-10-18
+
+**主题**：路由整体拆分（P2 第二批）
+
+**完成任务**：
+1. `sources.py`（1545 行）拆分为 `parse.py`（485）/ `validate.py`（553）/ `search.py`（543）/ `export.py`（67）
+2. `app/api/__init__.py` 改为聚合四个子路由，接口路径保持不变
+3. 同步更新 README、项目目录结构、系统架构设计中的路由说明
+4. 全接口冒烟通过：parse/file、parse/batch-files、parse/batch-urls、batch start、validate/start + result、search/start + result、export 创建/下载
+
+**验证**：pytest 52 passed
+
+详细文档：[SESSION_22](docs/sessions/SESSION_22_ROUTE_SPLIT.md)
+
 ---
 
-文档版本：v1.6
+文档版本：v1.7
 最后更新：2026-10-18
